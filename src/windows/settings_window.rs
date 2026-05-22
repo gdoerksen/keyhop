@@ -47,7 +47,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 
 use anyhow::Result;
 use windows::core::{w, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateSolidBrush, DeleteObject, FillRect, FrameRect, GetStockObject, InvalidateRect, HBRUSH,
     WHITE_BRUSH,
@@ -69,10 +69,11 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetDlgItem, GetMessageW,
-    GetParent, GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW, IsWindow, LoadCursorW,
-    PostQuitMessage, RegisterClassExW, SendMessageW, SetForegroundWindow, SetWindowTextW,
-    ShowWindow, TranslateMessage, UnregisterClassW, BM_GETCHECK, BM_SETCHECK, BN_CLICKED,
+    AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    GetDlgItem, GetMessageW, GetParent, GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW,
+    IsWindow, LoadCursorW, PostQuitMessage, RegisterClassExW, SendMessageW, SetForegroundWindow,
+    SetWindowTextW, ShowWindow, TranslateMessage, UnregisterClassW, BM_GETCHECK, BM_SETCHECK,
+    BN_CLICKED,
     BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_OWNERDRAW, BS_PUSHBUTTON, CBS_DROPDOWNLIST,
     CBS_HASSTRINGS, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CW_USEDEFAULT, ES_AUTOHSCROLL,
     ES_LEFT, ES_NUMBER, HMENU, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, WINDOW_EX_STYLE,
@@ -310,21 +311,36 @@ pub fn show(initial: &Config) -> Result<Option<Config>> {
         };
         let _ = RegisterClassExW(&wc);
 
-        // Calculate screen center position
+        let ex_style = WS_EX_DLGMODALFRAME | WS_EX_TOPMOST;
+        let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
+
+        // WINDOW_W / WINDOW_H are the desired *client* area. Convert to
+        // outer dimensions so the title bar and borders don't eat into
+        // the layout — fixes clipped buttons at >=125 % DPI scaling.
+        let mut rc = RECT {
+            left: 0,
+            top: 0,
+            right: WINDOW_W,
+            bottom: WINDOW_H,
+        };
+        let _ = AdjustWindowRectEx(&mut rc, style, false, ex_style);
+        let outer_w = rc.right - rc.left;
+        let outer_h = rc.bottom - rc.top;
+
         let screen_w = GetSystemMetrics(SM_CXSCREEN);
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
-        let x = (screen_w - WINDOW_W) / 2;
-        let y = (screen_h - WINDOW_H) / 2;
+        let x = (screen_w - outer_w) / 2;
+        let y = (screen_h - outer_h) / 2;
 
         let hwnd = CreateWindowExW(
-            WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
+            ex_style,
             class_name,
             w!("keyhop Settings"),
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+            style,
             x,
             y,
-            WINDOW_W,
-            WINDOW_H,
+            outer_w,
+            outer_h,
             None,
             None,
             hinstance,
