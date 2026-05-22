@@ -28,7 +28,7 @@
 //! are all created once on the first hotkey press and reused for the
 //! life of the process — subsequent picks just re-render and re-show.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::c_void;
 
@@ -54,13 +54,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SetFocus, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassInfoExW, GetMessageW,
-    GetSystemMetrics, GetWindowLongPtrW, LoadCursorW, RegisterClassExW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow,
-    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, IDC_ARROW, MSG, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
-    SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_KEYDOWN, WM_KILLFOCUS, WM_NCCREATE, WM_PAINT,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassInfoExW,
+    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, LoadCursorW, PostMessageW,
+    RegisterClassExW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, UpdateLayeredWindow,
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HHOOK, IDC_ARROW, MSG,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE,
+    SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WH_MOUSE_LL, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::Bounds;
@@ -76,6 +78,15 @@ const PILL_GAP: i32 = 4;
 /// this, `DT_END_ELLIPSIS` truncates visually. Keeps very long window
 /// titles from making one badge wider than a monitor.
 const MAX_EXTRA_CHARS: usize = 50;
+
+/// Custom message posted by [`scroll_hook_proc`] to dismiss the overlay
+/// when a mouse-wheel scroll is detected. `0x8000` is `WM_APP`, the
+/// start of the private application message range.
+const WM_SCROLL_DISMISS: u32 = 0x8000;
+
+/// `WM_MOUSEHWHEEL` (horizontal mouse wheel). Not always re-exported by
+/// the `windows` crate, so we define it from the SDK value.
+const WM_MOUSEHWHEEL_RAW: u32 = 0x020E;
 
 /// One pickable thing on screen. The renderer treats `bounds` as a
 /// screen-space anchor and places the label badge at the top-left of that
@@ -1201,6 +1212,34 @@ fn arrowhead_polygon(start: POINT, end: POINT) -> [POINT; 3] {
     [end, left, right]
 }
 
+/// Low-level mouse hook callback installed for the duration of a pick.
+///
+/// Windows 10+ routes `WM_MOUSEWHEEL` to the window under the cursor
+/// (not the focus window) when "Scroll inactive windows when I hover
+/// over them" is enabled (the default). That means wheel events bypass
+/// the overlay entirely and scroll the page underneath, leaving the
+/// badges at stale positions. This hook intercepts the wheel before
+/// it reaches any window and posts [`WM_SCROLL_DISMISS`] to the
+/// overlay so `wnd_proc` can cancel the pick.
+unsafe extern "system" fn scroll_hook_proc(
+    code: i32,
+    wp: WPARAM,
+    lp: LPARAM,
+) -> LRESULT {
+    if code >= 0 {
+        let msg = wp.0 as u32;
+        if msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL_RAW {
+            SCROLL_HOOK_TARGET.with(|cell| {
+                let hwnd = cell.get();
+                if !hwnd.0.is_null() {
+                    let _ = PostMessageW(hwnd, WM_SCROLL_DISMISS, WPARAM(0), LPARAM(0));
+                }
+            });
+        }
+    }
+    CallNextHookEx(None, code, wp, lp)
+}
+
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if msg == WM_NCCREATE {
         let cs = lp.0 as *const CREATESTRUCTW;
@@ -1238,6 +1277,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             // clobber a just-set `selected` back to `None` and silently
             // swallow the user's pick.
             if !state.done {
+                state.selected = None;
+                state.done = true;
+            }
+            LRESULT(0)
+        }
+        WM_SCROLL_DISMISS => {
+            if !state.done {
+                tracing::debug!("overlay dismissed: scroll detected");
                 state.selected = None;
                 state.done = true;
             }
@@ -1313,6 +1360,13 @@ pub fn pick_hint(hints: Vec<Hint>, style: HintStyle) -> Result<Option<PickResult
 // is enough to make the HWND/DIB/DC truly process-wide.
 thread_local! {
     static PERSISTENT_OVERLAY: RefCell<Option<PersistentOverlay>> = const { RefCell::new(None) };
+}
+
+// Overlay HWND exposed to `scroll_hook_proc` so the low-level mouse
+// hook can post `WM_SCROLL_DISMISS` to the right window. Set/cleared
+// inside `PersistentOverlay::run_pick`; null between picks.
+thread_local! {
+    static SCROLL_HOOK_TARGET: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
 }
 
 /// Persistent rendering resources for the overlay: the layered HWND
@@ -1455,6 +1509,16 @@ impl PersistentOverlay {
         let _ = SetForegroundWindow(self.hwnd);
         let _ = SetFocus(self.hwnd);
 
+        // Install a low-level mouse hook to detect scroll events.
+        // Windows 10+'s "scroll inactive windows" routes WM_MOUSEWHEEL
+        // to the window under the cursor, bypassing our focused overlay.
+        // The hook intercepts wheel events globally and posts
+        // WM_SCROLL_DISMISS so the overlay cancels before the badges
+        // desync from the scrolled content.
+        SCROLL_HOOK_TARGET.with(|cell| cell.set(self.hwnd));
+        let scroll_hook: Option<HHOOK> =
+            SetWindowsHookExW(WH_MOUSE_LL, Some(scroll_hook_proc), None, 0).ok();
+
         // Modal pump: spin until the state flags `done`. After every
         // dispatched message we re-render so live prefix-typing visibly
         // hides non-matching badges. Clippy can't see through the
@@ -1485,6 +1549,14 @@ impl PersistentOverlay {
                 last_typed_len = state.typed.len();
             }
         }
+
+        // Tear down the scroll hook before anything else so a stray
+        // WM_SCROLL_DISMISS can't arrive after we've snapshotted the
+        // result or started hiding the window.
+        if let Some(hook) = scroll_hook {
+            let _ = UnhookWindowsHookEx(hook);
+        }
+        SCROLL_HOOK_TARGET.with(|cell| cell.set(HWND(std::ptr::null_mut())));
 
         // Snapshot the user's selection BEFORE any teardown. ShowWindow
         // (SW_HIDE) on a focused window synchronously dispatches
