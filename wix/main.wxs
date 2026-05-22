@@ -15,9 +15,10 @@
       add ARPURLINFOABOUT / ARPHELPLINK / ARPURLUPDATEINFO /
       ARPNOMODIFY / ARPNOREPAIR so users get Help link + "About" link
       and the entry is non-modifiable).
-    * RestartManager is on by default in Windows Installer; combined
-      with `MajorUpgrade` it cleanly closes a running keyhop.exe
-      before the upgrade overwrites it.
+    * A custom action terminates any running keyhop.exe before
+      InstallValidate so the "Files In Use" dialog never appears.
+      A Type-18 custom action relaunches keyhop.exe after the
+      upgrade completes.
     * No EULA dialog. Microsoft Store only checks `msiexec /qn`
       silent install, which works regardless of UI; an EULA would
       block users who double-click. The MIT license is still
@@ -53,15 +54,41 @@
             SummaryCodepage='1252'
             />
 
-        <!--
-          Cleanly close a running keyhop.exe via Windows Installer's
-          RestartManager before the upgrade overwrites the file. Without
-          this an upgrade would fail with "files in use" if keyhop is
-          running from the tray.
-        -->
         <MajorUpgrade
             Schedule='afterInstallInitialize'
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
+
+        <!--
+          Kill any running keyhop.exe before InstallValidate so the
+          "Files In Use" dialog never appears. Return="ignore" lets
+          the install proceed even when keyhop is not running (taskkill
+          exits non-zero if the process is not found).
+        -->
+        <SetProperty Id='CLOSEKHCMD' Value='[SystemFolder]cmd.exe'
+                     After='CostFinalize' Sequence='execute' />
+        <CustomAction
+            Id='CloseKeyhop'
+            Property='CLOSEKHCMD'
+            ExeCommand='/c taskkill /f /im keyhop.exe'
+            Return='ignore' />
+
+        <!--
+          Relaunch keyhop.exe after an upgrade so the user does not
+          have to start it manually. Runs only when upgrading from an
+          older version (WIX_UPGRADE_DETECTED), not on fresh install
+          or uninstall. asyncNoWait lets the installer exit immediately
+          without waiting for keyhop's message loop.
+        -->
+        <CustomAction
+            Id='LaunchKeyhop'
+            FileKey='exe0'
+            ExeCommand=''
+            Return='asyncNoWait' />
+
+        <InstallExecuteSequence>
+            <Custom Action='CloseKeyhop' Before='InstallValidate'>1</Custom>
+            <Custom Action='LaunchKeyhop' After='InstallFinalize'>WIX_UPGRADE_DETECTED</Custom>
+        </InstallExecuteSequence>
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
         <Property Id='DiskPrompt' Value='Keyhop Installation'/>

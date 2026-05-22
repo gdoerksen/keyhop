@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Auto-close and relaunch on upgrade ([#12](https://github.com/rsaz/keyhop/issues/12)).** The MSI installer now automatically closes a running keyhop.exe before upgrading and relaunches it when the upgrade completes — the "Files In Use" dialog that previously interrupted reinstalls is eliminated. Uses WiX Util extension's `CloseApplication` (sends WM_CLOSE, the same graceful shutdown as `keyhop --close`) with a 5-second timeout, and a Type-18 custom action to relaunch after `InstallFinalize`.
 - **Modifier-aware hint actions ([#7](https://github.com/rsaz/keyhop/issues/7)).** While the element-picker overlay is open, holding a modifier key on the *completing* hint keystroke changes what happens to the target element:
     - **Ctrl + letter** — synthesizes a **double-click** at the element's centre (for file-list rows, custom controls that distinguish single from double click, etc.).
     - **Shift + letter** — synthesizes a **right-click** at the element's centre (opens the element's context menu).
