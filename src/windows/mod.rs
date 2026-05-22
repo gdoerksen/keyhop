@@ -950,13 +950,19 @@ impl Backend for WindowsBackend {
         self.elements.clear();
         self.next_id = 0;
 
-        let records = walk_window(
+        let records = match walk_window(
             &self.automation,
             &self.cache_request,
             &self.desktop_condition,
             hwnd,
             is_browser,
-        )?;
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(?hwnd, error = ?e, "foreground window walk failed");
+                return Ok(Vec::new());
+            }
+        };
         let out = self.register_records(records);
 
         // Refresh the cache with the just-collected elements so the

@@ -271,11 +271,11 @@ fn run_windows(cli: Cli) -> anyhow::Result<()> {
     // The tray is opt-in via `--no-tray` and best-effort otherwise: if it
     // can't be created (e.g. headless CI, no Explorer shell) we still want
     // the hotkeys to work.
-    let tray = if cli.no_tray {
+    let mut tray = if cli.no_tray {
         tracing::info!("--no-tray: running without system tray icon");
         None
     } else {
-        match Tray::build() {
+        match Tray::build(&config.hotkeys) {
             Ok(t) => Some(t),
             Err(e) => {
                 tracing::warn!(error = ?e, "tray icon unavailable; continuing with hotkeys only");
@@ -370,6 +370,7 @@ fn run_windows(cli: Cli) -> anyhow::Result<()> {
                     &mut runtime,
                     &mut backend,
                     &mut hotkeys,
+                    tray.as_mut(),
                     /* announce = */ true,
                 );
             }
@@ -391,6 +392,7 @@ fn run_windows(cli: Cli) -> anyhow::Result<()> {
                             &mut runtime,
                             &mut backend,
                             &mut hotkeys,
+                            tray.as_mut(),
                             /* announce = */ true,
                         );
                     }
@@ -412,70 +414,50 @@ fn run_windows(cli: Cli) -> anyhow::Result<()> {
             }
         }
 
-        if let Some(tray) = tray.as_ref() {
-            for cmd in tray.poll_commands() {
-                match cmd {
-                    TrayCommand::PickElement => {
-                        if let Err(e) = handle_pick_element(&mut backend, &runtime) {
-                            tracing::error!(error = ?e, "tray PickElement failed");
-                            notification::error(
-                                "keyhop: pick element failed",
-                                &format!("{e}\n\nSee log for details."),
-                            );
+        let tray_cmds: Vec<TrayCommand> = tray
+            .as_ref()
+            .map(|t| t.poll_commands())
+            .unwrap_or_default();
+        for cmd in tray_cmds {
+            match cmd {
+                TrayCommand::OpenSettings => match settings_window::show(&config) {
+                    Ok(Some(new_config)) => {
+                        apply_config(
+                            &new_config,
+                            &mut config,
+                            &mut runtime,
+                            &mut backend,
+                            &mut hotkeys,
+                            tray.as_mut(),
+                            /* announce = */ true,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::error!(error = ?e, "settings window failed");
+                        notification::error("Couldn't open Settings", &format!("{e}"));
+                    }
+                },
+                TrayCommand::ViewLog => {
+                    #[cfg(not(debug_assertions))]
+                    {
+                        if let Err(e) = open_log_file() {
+                            tracing::error!(error = ?e, "failed to open log file");
+                            notification::error("keyhop: couldn't open log", &format!("{e}"));
                         }
                     }
-                    TrayCommand::PickWindow => {
-                        if let Err(e) = handle_pick_window(&runtime) {
-                            tracing::error!(error = ?e, "tray PickWindow failed");
-                            notification::error(
-                                "keyhop: pick window failed",
-                                &format!("{e}\n\nSee log for details."),
-                            );
-                        }
+                    #[cfg(debug_assertions)]
+                    {
+                        notification::info(
+                            "View Log unavailable",
+                            "Debug builds write logs to stderr, not to a file. \
+                            Run the release build to use this option.",
+                        );
                     }
-                    TrayCommand::OpenSettings => match settings_window::show(&config) {
-                        Ok(Some(new_config)) => {
-                            apply_config(
-                                &new_config,
-                                &mut config,
-                                &mut runtime,
-                                &mut backend,
-                                &mut hotkeys,
-                                /* announce = */ true,
-                            );
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            tracing::error!(error = ?e, "settings window failed");
-                            notification::error("Couldn't open Settings", &format!("{e}"));
-                        }
-                    },
-                    TrayCommand::ViewLog => {
-                        #[cfg(not(debug_assertions))]
-                        {
-                            if let Err(e) = open_log_file() {
-                                tracing::error!(error = ?e, "failed to open log file");
-                                notification::error("keyhop: couldn't open log", &format!("{e}"));
-                            }
-                        }
-                        #[cfg(debug_assertions)]
-                        {
-                            // Debug builds write to stderr, so there's no
-                            // log file to open. Surface that to the user
-                            // rather than silently doing nothing.
-                            notification::info(
-                                "View Log unavailable",
-                                "Debug builds write logs to stderr, not to a file. \
-                                Run the release build to use this option.",
-                            );
-                        }
-                    }
-                    TrayCommand::Quit => {
-                        tracing::info!("quit requested from tray");
-                        // PostQuitMessage queues WM_QUIT; the next
-                        // GetMessageW returns 0 and we break above.
-                        unsafe { PostQuitMessage(0) };
-                    }
+                }
+                TrayCommand::Quit => {
+                    tracing::info!("quit requested from tray");
+                    unsafe { PostQuitMessage(0) };
                 }
             }
         }
@@ -527,6 +509,7 @@ fn apply_config(
     runtime: &mut Runtime,
     backend: &mut keyhop::windows::WindowsBackend,
     hotkeys: &mut Hotkeys,
+    tray: Option<&mut Tray>,
     announce: bool,
 ) {
     let resolved_alphabet = keyhop::alphabet_presets::build_alphabet(&new_config.hints);
@@ -577,6 +560,10 @@ fn apply_config(
     // everything else has already taken effect in-process.
     if let Err(e) = startup::set_enabled(new_config.startup.launch_at_startup) {
         tracing::warn!(error = ?e, "couldn't sync launch-at-startup registry entry");
+    }
+
+    if let Some(tray) = tray {
+        tray.update_labels(&new_config.hotkeys);
     }
 
     *cached = new_config.clone();

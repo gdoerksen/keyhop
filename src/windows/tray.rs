@@ -17,17 +17,11 @@ use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
 };
 
-/// What a tray menu click should do. A superset of
-/// [`super::hotkey::HotkeyAction`] — adds entries that have no hotkey
-/// equivalent (we don't want global "quit" or "open settings" chords).
+use crate::config::HotkeyBindings;
+
+/// What a tray menu click should do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
-    /// Same as `Ctrl+Shift+Space`: pick an interactable element in the
-    /// foreground window.
-    PickElement,
-    /// Same as `Ctrl+Alt+Space`: pick a top-level window across all
-    /// monitors and focus it.
-    PickWindow,
     /// Open the modal Settings window for editing hotkeys, hint
     /// alphabet, colors, and Windows startup integration.
     OpenSettings,
@@ -42,42 +36,43 @@ const TRAY_ICON_PX: u32 = 32;
 /// Owns the tray icon and its menu items. Drop removes the icon from the
 /// notification area.
 pub struct Tray {
-    // Field order matters for drop: the tray must drop before the items
-    // (and the items before the icon) but in practice tray-icon holds its
-    // own Arcs, so we mainly keep these around to extend lifetimes and
-    // because their `id()`s feed the event-id comparison below.
-    _tray: TrayIcon,
-    pick_element_id: MenuId,
-    pick_window_id: MenuId,
+    tray: TrayIcon,
     settings_id: MenuId,
     view_log_id: Option<MenuId>,
     quit_id: MenuId,
-    _items: TrayItems,
+    items: TrayItems,
 }
 
-// Kept alive for the lifetime of `Tray`. `tray-icon`/`muda` hold internal
-// references but explicit ownership avoids relying on those internals.
 struct TrayItems {
-    _pick_element: MenuItem,
-    _pick_window: MenuItem,
+    pick_element: MenuItem,
+    pick_window: MenuItem,
     _about: MenuItem,
-    _settings: MenuItem,
+    settings: MenuItem,
     _view_log: Option<MenuItem>,
     _quit: MenuItem,
 }
 
 impl Tray {
-    /// Create the tray icon with keyhop's default menu. Must be called on
-    /// the thread that runs the Win32 message loop — the OS posts tray
-    /// notifications back to the creating thread.
-    pub fn build() -> Result<Self> {
-        let pick_element = MenuItem::new("Pick element\tCtrl+Shift+Space", true, None);
-        let pick_window = MenuItem::new("Pick window\tCtrl+Alt+Space", true, None);
-        // Disabled label, just to expose the version inside the menu.
+    /// Create the tray icon with keyhop's menu. Labels include the
+    /// configured hotkey chords so the user sees their actual bindings.
+    /// Must be called on the thread that runs the Win32 message loop.
+    pub fn build(hotkeys: &HotkeyBindings) -> Result<Self> {
+        let pick_element = MenuItem::new(
+            format!("Pick element\t{}", hotkeys.pick_element),
+            false,
+            None,
+        );
+        let pick_window = MenuItem::new(
+            format!("Pick window\t{}", hotkeys.pick_window),
+            false,
+            None,
+        );
         let about = MenuItem::new(concat!("keyhop v", env!("CARGO_PKG_VERSION")), false, None);
-        // Settings shows its default chord too, mirroring the format used
-        // by the picker entries above.
-        let settings = MenuItem::new("Settings...\tCtrl+Shift+,", true, None);
+        let settings = MenuItem::new(
+            format!("Settings...\t{}", hotkeys.open_settings),
+            true,
+            None,
+        );
 
         // View Log is always present so users always have a one-click
         // path to the file. Debug builds (where logs go to stderr) just
@@ -108,7 +103,11 @@ impl Tray {
         menu.append(&quit).context("appending Quit item")?;
 
         let icon = build_icon().context("building tray icon")?;
-        let tooltip = format!("keyhop v{} — Ctrl+Shift+Space", env!("CARGO_PKG_VERSION"));
+        let tooltip = format!(
+            "keyhop v{} — {}",
+            env!("CARGO_PKG_VERSION"),
+            hotkeys.pick_element,
+        );
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip(tooltip)
@@ -116,8 +115,6 @@ impl Tray {
             .build()
             .context("creating tray icon")?;
 
-        let pick_element_id = pick_element.id().clone();
-        let pick_window_id = pick_window.id().clone();
         let settings_id = settings.id().clone();
         let view_log_id = view_log.as_ref().map(|v| v.id().clone());
         let quit_id = quit.id().clone();
@@ -125,21 +122,39 @@ impl Tray {
         tracing::info!("tray icon registered");
 
         Ok(Self {
-            _tray: tray,
-            pick_element_id,
-            pick_window_id,
+            tray,
             settings_id,
             view_log_id,
             quit_id,
-            _items: TrayItems {
-                _pick_element: pick_element,
-                _pick_window: pick_window,
+            items: TrayItems {
+                pick_element,
+                pick_window,
                 _about: about,
-                _settings: settings,
+                settings,
                 _view_log: view_log,
                 _quit: quit,
             },
         })
+    }
+
+    /// Refresh menu labels and tooltip to reflect new hotkey bindings.
+    /// Called from `apply_config` after the user saves Settings.
+    pub fn update_labels(&mut self, hotkeys: &HotkeyBindings) {
+        self.items
+            .pick_element
+            .set_text(format!("Pick element\t{}", hotkeys.pick_element));
+        self.items
+            .pick_window
+            .set_text(format!("Pick window\t{}", hotkeys.pick_window));
+        self.items
+            .settings
+            .set_text(format!("Settings...\t{}", hotkeys.open_settings));
+        let tooltip = format!(
+            "keyhop v{} — {}",
+            env!("CARGO_PKG_VERSION"),
+            hotkeys.pick_element,
+        );
+        let _ = self.tray.set_tooltip(Some(tooltip));
     }
 
     /// Drain the tray menu channel and translate events into
@@ -150,18 +165,13 @@ impl Tray {
         let receiver = MenuEvent::receiver();
         let mut out = Vec::new();
         while let Ok(event) = receiver.try_recv() {
-            if event.id == self.pick_element_id {
-                out.push(TrayCommand::PickElement);
-            } else if event.id == self.pick_window_id {
-                out.push(TrayCommand::PickWindow);
-            } else if event.id == self.settings_id {
+            if event.id == self.settings_id {
                 out.push(TrayCommand::OpenSettings);
             } else if self.view_log_id.as_ref().is_some_and(|id| event.id == *id) {
                 out.push(TrayCommand::ViewLog);
             } else if event.id == self.quit_id {
                 out.push(TrayCommand::Quit);
             }
-            // Other events (e.g. About, separators) are ignored.
         }
         out
     }
