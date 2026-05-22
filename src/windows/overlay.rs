@@ -50,7 +50,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_BACK, VK_ESCAPE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, SetFocus, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_SHIFT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassInfoExW, GetMessageW,
     GetSystemMetrics, GetWindowLongPtrW, LoadCursorW, RegisterClassExW, SetForegroundWindow,
@@ -92,6 +94,45 @@ pub struct Hint {
     /// can disambiguate two windows whose badges would otherwise be at
     /// the same pixel.
     pub extra: Option<String>,
+}
+
+/// Modifier key held at the moment the user pressed the final
+/// hint-completing letter. Routed to the caller so it can pick the
+/// right [`crate::Action`] variant (Invoke / RightClick / DoubleClick)
+/// without the overlay itself needing to know what each modifier maps
+/// to.
+///
+/// Only one modifier is reported per pick — Ctrl wins over Shift if
+/// both happen to be held when the matching key fires, which keeps the
+/// caller's match arm trivial and matches the typical "I held Ctrl
+/// because I wanted a double-click" intent. Modifier state is sampled
+/// *only* on the keystroke that completes the label; intermediate
+/// prefix characters don't have to be modified, so the user can press
+/// Ctrl just before the last letter and still get a double-click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickModifier {
+    /// No modifier was held when the hint completed — perform the
+    /// element's primary action via UIA invoke / mouse fallback.
+    None,
+    /// Control was held — caller should synthesize a double-click.
+    Ctrl,
+    /// Shift was held — caller should synthesize a right-click (context
+    /// menu).
+    Shift,
+}
+
+/// What [`pick_hint`] returns on a successful pick: which hint was
+/// chosen, plus the modifier (if any) the user held to influence what
+/// happens next. Callers that don't care about modifiers can ignore
+/// [`PickResult::modifier`] entirely.
+#[derive(Debug, Clone, Copy)]
+pub struct PickResult {
+    /// Index into the input `hints` vec the user picked.
+    pub index: usize,
+    /// Modifier key held at the moment the pick completed. See
+    /// [`PickModifier`] for the precedence rule when multiple
+    /// modifiers are held.
+    pub modifier: PickModifier,
 }
 
 /// Visual presets for the overlay. The element and window pickers use
@@ -332,6 +373,11 @@ struct OverlayState {
     /// Index into `laid` of the chosen entry, set by `key_down` on a full
     /// label match. `None` means "user cancelled or window closed."
     selected: Option<usize>,
+    /// Modifier key held at the moment `selected` was set. Sampled in
+    /// `key_down` on the completing keystroke so the caller (see
+    /// `PickResult`) can decide between Invoke / DoubleClick / RightClick.
+    /// Meaningful only when `selected` is `Some`.
+    modifier: PickModifier,
     /// Set to `true` when the modal pump should exit (selection made,
     /// Esc pressed, or focus lost). Replaces the old DestroyWindow +
     /// PostQuitMessage flow now that the HWND is persistent.
@@ -352,6 +398,7 @@ impl OverlayState {
             style,
             typed: String::new(),
             selected: None,
+            modifier: PickModifier::None,
             done: false,
             label_font,
             extra_font,
@@ -582,6 +629,14 @@ impl OverlayState {
             self.typed.push(ch);
 
             if let Some(idx) = self.laid.iter().position(|h| h.label == self.typed) {
+                // Sample modifiers *only* on the completing keystroke.
+                // Sampling on every prefix character would force the
+                // user to hold Ctrl/Shift continuously across a
+                // multi-letter label — annoying and easy to fumble.
+                // Reading state once at completion is also the
+                // semantically correct moment: it's the keystroke that
+                // commits the pick.
+                self.modifier = current_modifier();
                 self.selected = Some(idx);
                 self.done = true;
                 return;
@@ -591,6 +646,30 @@ impl OverlayState {
             if !any_prefix {
                 self.typed.clear();
             }
+        }
+    }
+}
+
+/// Sample the Ctrl/Shift state right now.
+///
+/// `GetAsyncKeyState` returns a `SHORT` whose high-order bit is set
+/// while the key is down; we test against `0x8000` (the cast through
+/// `u16` keeps the bit pattern intact regardless of platform short
+/// signedness). Ctrl takes precedence over Shift when both are held
+/// — a deliberate, documented choice (see [`PickModifier`]) that
+/// avoids needing a four-state enum for what users would mistype
+/// half the time anyway.
+fn current_modifier() -> PickModifier {
+    const PRESSED: u16 = 0x8000;
+    unsafe {
+        let ctrl = (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16) & PRESSED != 0;
+        let shift = (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16) & PRESSED != 0;
+        if ctrl {
+            PickModifier::Ctrl
+        } else if shift {
+            PickModifier::Shift
+        } else {
+            PickModifier::None
         }
     }
 }
@@ -1204,8 +1283,9 @@ unsafe fn virtual_screen_rect() -> (i32, i32, i32, i32) {
 /// Show the hint overlay and block on a Win32 message loop until the
 /// user picks a hint, presses `Esc`, or the window loses focus.
 ///
-/// Returns `Ok(Some(idx))` where `idx` indexes into the input `hints` vec
-/// when the user picks one, and `Ok(None)` on cancel / focus loss / empty
+/// Returns `Ok(Some(result))` describing the chosen hint and the
+/// modifier (if any) held when the user committed the pick — see
+/// [`PickResult`]. Returns `Ok(None)` on cancel / focus loss / empty
 /// input.
 ///
 /// The HWND, off-screen DIB, and memory DC are owned by a thread-local
@@ -1213,7 +1293,7 @@ unsafe fn virtual_screen_rect() -> (i32, i32, i32, i32) {
 /// [`OverlayState`] is allocated/freed each time. This drops the
 /// per-pick window-creation latency (~20-40 ms on Windows 11) to zero
 /// after the first hotkey press.
-pub fn pick_hint(hints: Vec<Hint>, style: HintStyle) -> Result<Option<usize>> {
+pub fn pick_hint(hints: Vec<Hint>, style: HintStyle) -> Result<Option<PickResult>> {
     if hints.is_empty() {
         return Ok(None);
     }
@@ -1329,7 +1409,11 @@ impl PersistentOverlay {
         Ok(())
     }
 
-    unsafe fn run_pick(&mut self, hints: Vec<Hint>, style: HintStyle) -> Result<Option<usize>> {
+    unsafe fn run_pick(
+        &mut self,
+        hints: Vec<Hint>,
+        style: HintStyle,
+    ) -> Result<Option<PickResult>> {
         self.ensure_geometry()?;
 
         let (vx, vy, vw, vh) = (self.origin_x, self.origin_y, self.width, self.height);
@@ -1407,7 +1491,10 @@ impl PersistentOverlay {
         // WM_KILLFOCUS through wnd_proc, and even with the `state.done`
         // guard in the handler we don't want any future bookkeeping in
         // there to risk overwriting `selected`. Read once, return that.
-        let result = state.selected;
+        let result = state.selected.map(|index| PickResult {
+            index,
+            modifier: state.modifier,
+        });
 
         // Hide first, then unbind the state pointer. The order matters
         // because ShowWindow can pump a few WM_KILLFOCUS / WM_NCACTIVATE

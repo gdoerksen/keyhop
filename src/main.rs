@@ -7,6 +7,14 @@
 //! - `Ctrl + Alt + Space` — pick a top-level window across all monitors
 //!   and bring it to the foreground.
 //!
+//! While the element overlay is open, modifier keys on the *completing*
+//! hint keystroke change the action:
+//!
+//! - **Ctrl + letter** — double-click the element.
+//! - **Shift + letter** — right-click (context menu) the element.
+//! - **No modifier** — standard invoke (UIA pattern cascade / left-click
+//!   fallback).
+//!
 //! Both actions are also exposed through a system tray icon (right-click
 //! the yellow "K" badge in the notification area). `Esc` cancels either
 //! overlay; the tray's `Quit` entry exits the message loop.
@@ -24,7 +32,7 @@ use keyhop::windows::{
     config_watcher::{self, WM_USER_RELOAD_CONFIG},
     hotkey::{HotkeyAction, HotkeyConflict, Hotkeys},
     ipc, notification,
-    overlay::{pick_hint, Hint, HintStyle},
+    overlay::{pick_hint, Hint, HintStyle, PickModifier},
     settings_window,
     single_instance::InstanceGuard,
     splash_screen::SplashScreen,
@@ -140,6 +148,11 @@ fn print_help() {
     println!("    Ctrl+Shift+Space  Pick element in foreground window");
     println!("    Ctrl+Alt+Space    Pick top-level window across all monitors");
     println!("    Esc               Cancel an open overlay");
+    println!();
+    println!("HINT MODIFIERS (element picker):");
+    println!("    <letter>          Invoke (primary action / left-click fallback)");
+    println!("    Ctrl+<letter>     Double-click the element");
+    println!("    Shift+<letter>    Right-click the element (context menu)");
     println!();
     println!("LOGS (release builds):");
     println!("    Location:         %LOCALAPPDATA%\\keyhop\\keyhop.log[.YYYY-MM-DD]");
@@ -637,10 +650,26 @@ fn handle_pick_element(
     tracing::info!(count = hints.len(), "showing element overlay");
 
     match pick_hint(hints, runtime.element_style)? {
-        Some(idx) => {
-            let chosen = &elements[idx];
-            tracing::info!(id = ?chosen.id, role = ?chosen.role, "element selected — invoking");
-            if let Err(e) = backend.perform(chosen.id, Action::Invoke) {
+        Some(result) => {
+            let chosen = &elements[result.index];
+            // Modifier held at commit time picks the action variant.
+            // Ctrl + letter → double-click, Shift + letter → right-click
+            // (context menu), no modifier → the standard UIA invoke path.
+            // See `PickModifier` for the precedence rule when both are
+            // held.
+            let action = match result.modifier {
+                PickModifier::Ctrl => Action::DoubleClick,
+                PickModifier::Shift => Action::RightClick,
+                PickModifier::None => Action::Invoke,
+            };
+            tracing::info!(
+                id = ?chosen.id,
+                role = ?chosen.role,
+                modifier = ?result.modifier,
+                ?action,
+                "element selected — performing"
+            );
+            if let Err(e) = backend.perform(chosen.id, action) {
                 tracing::warn!(error = ?e, "perform failed");
             }
         }

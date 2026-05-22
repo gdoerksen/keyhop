@@ -12,6 +12,22 @@ pub enum Action {
     Focus,
     /// Synthesize a left mouse click at the element's center.
     Click,
+    /// Synthesize a right mouse click at the element's center.
+    ///
+    /// Exposed via the overlay's Shift modifier on a hint letter so the
+    /// user can pop the element's context menu instead of invoking it.
+    /// Unlike [`Action::Invoke`], this path never goes through a UIA
+    /// pattern — context menus aren't expressible as UIA actions, so
+    /// synthesized input is the only mechanism that works.
+    RightClick,
+    /// Synthesize a double left-click at the element's center.
+    ///
+    /// Exposed via the overlay's Ctrl modifier on a hint letter. Used
+    /// for controls that genuinely need a second click (file-list rows,
+    /// some custom controls that distinguish single from double click).
+    /// Both clicks land within the system's `GetDoubleClickTime` window
+    /// by issuing them in a single `SendInput` batch.
+    DoubleClick,
     /// Type the given string into the element.
     Type(String),
     /// Scroll the element's container by the given delta in physical pixels.

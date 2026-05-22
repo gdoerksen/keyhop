@@ -290,8 +290,11 @@ pub fn pick_with(
         })
         .collect();
 
+    // Modifier keys are meaningless for the window picker — focusing a
+    // window doesn't have a "double-click" or "right-click" variant.
+    // Discard the modifier and use the index only.
     match pick_hint(hints, style)? {
-        Some(idx) => Ok(Some(windows.into_iter().nth(idx).unwrap())),
+        Some(result) => Ok(Some(windows.into_iter().nth(result.index).unwrap())),
         None => Ok(None),
     }
 }
