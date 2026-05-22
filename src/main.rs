@@ -630,10 +630,6 @@ fn handle_pick_element(
     let elements: Vec<Element> = backend.enumerate_by_scope(runtime.scope_mode)?;
     if elements.is_empty() {
         tracing::info!("no interactable elements in foreground window");
-        notification::info(
-            "keyhop",
-            "No interactive elements found in the foreground window.",
-        );
         return Ok(());
     }
 
