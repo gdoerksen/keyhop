@@ -1466,14 +1466,26 @@ fn try_record_desktop_after_filter(el: &UIElement) -> Option<WalkRecord> {
 }
 
 /// Drop records that are visually redundant with another record in the
-/// same window: when one record's bounds fully contain another and the
-/// outer is meaningfully larger, keep the inner (the more specific click
-/// target) and drop the outer (a container disguised as clickable).
+/// same window.
 ///
-/// The 3:2 area ratio guard keeps near-equal records from cannibalizing
-/// each other (e.g. a Button and its inner Text node sharing bounds) —
-/// in those cases the walker emits both and the layout collision logic
-/// hides the duplicate naturally.
+/// Two rules (applied per record):
+///
+///  1. **Area-ratio rule:** when a record's bounds fully contain another
+///     and its area exceeds 1.5× the inner's area, the outer is a
+///     container disguised as clickable — drop it, keep the inner.
+///
+///  2. **Single-child rule:** when a record contains *exactly one* other
+///     record (regardless of area ratio), the outer is a thin wrapper —
+///     drop it and keep the child. This handles toolbar rows, list items,
+///     and navigation links where a container and its sole actionable
+///     child would otherwise both get badges (issue #19).
+///
+/// The 3:2 area guard in rule 1 prevents near-equal records from
+/// cannibalizing each other (e.g. a Button and its inner Text node
+/// sharing bounds) — in those cases the walker emits both and the
+/// layout collision logic hides the duplicate naturally. Rule 2 only
+/// fires for single-child wrappers, so multi-element containers that
+/// happen to share bounds are left alone.
 ///
 /// Worst-case complexity is O(n²), but `n` is bounded by
 /// [`MAX_ELEMENTS_DESKTOP`]/[`MAX_ELEMENTS_BROWSER`] so the absolute cost
@@ -1494,6 +1506,7 @@ fn dedup_nested_records(records: Vec<WalkRecord>) -> Vec<WalkRecord> {
         }
         let outer = &records[i].bounds;
         let outer_area = areas[i];
+        let mut contained_count: u32 = 0;
         for j in 0..n {
             if i == j || !keep[j] {
                 continue;
@@ -1502,13 +1515,14 @@ fn dedup_nested_records(records: Vec<WalkRecord>) -> Vec<WalkRecord> {
             if !bounds_contains(outer, inner) {
                 continue;
             }
-            // Outer must be at least 1.5× the inner's area before we
-            // call it "the container" — otherwise the two are essentially
-            // co-located and we leave dedup to the overlay layout pass.
+            contained_count += 1;
             if outer_area > areas[j].saturating_mul(3) / 2 {
                 keep[i] = false;
                 break;
             }
+        }
+        if keep[i] && contained_count == 1 {
+            keep[i] = false;
         }
     }
     records
