@@ -62,11 +62,8 @@ impl Tray {
             false,
             None,
         );
-        let pick_window = MenuItem::new(
-            format!("Pick window\t{}", hotkeys.pick_window),
-            false,
-            None,
-        );
+        let pick_window =
+            MenuItem::new(format!("Pick window\t{}", hotkeys.pick_window), false, None);
         let about = MenuItem::new(concat!("keyhop v", env!("CARGO_PKG_VERSION")), false, None);
         let settings = MenuItem::new(
             format!("Settings...\t{}", hotkeys.open_settings),

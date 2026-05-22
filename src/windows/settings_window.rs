@@ -73,8 +73,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetDlgItem, GetMessageW, GetParent, GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW,
     IsWindow, LoadCursorW, PostQuitMessage, RegisterClassExW, SendMessageW, SetForegroundWindow,
     SetWindowTextW, ShowWindow, TranslateMessage, UnregisterClassW, BM_GETCHECK, BM_SETCHECK,
-    BN_CLICKED,
-    BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_OWNERDRAW, BS_PUSHBUTTON, CBS_DROPDOWNLIST,
+    BN_CLICKED, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_OWNERDRAW, BS_PUSHBUTTON, CBS_DROPDOWNLIST,
     CBS_HASSTRINGS, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CW_USEDEFAULT, ES_AUTOHSCROLL,
     ES_LEFT, ES_NUMBER, HMENU, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, WINDOW_EX_STYLE,
     WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DRAWITEM, WM_HSCROLL, WM_KEYDOWN,
@@ -1633,10 +1632,8 @@ fn collect_config() -> Option<(Config, bool)> {
         } else {
             Some(show_leader_checked)
         };
-        let element_font_size =
-            unsafe { spinner_value(st.element_font_size) }.clamp(6, 120) as u8;
-        let window_font_size =
-            unsafe { spinner_value(st.window_font_size) }.clamp(10, 120) as u8;
+        let element_font_size = unsafe { spinner_value(st.element_font_size) }.clamp(6, 120) as u8;
+        let window_font_size = unsafe { spinner_value(st.window_font_size) }.clamp(10, 120) as u8;
         let launch_startup = unsafe { is_checked(st.launch_startup) };
 
         // For non-Custom presets the "custom alphabet" field is a

@@ -1053,7 +1053,12 @@ impl MouseButton {
     /// build `MOUSEINPUT` records explicitly rather than going through
     /// a higher-level helper because we need the down/up events to land
     /// in a single `SendInput` batch (see [`click_at`] for why).
-    fn flags(self) -> (windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS, windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS) {
+    fn flags(
+        self,
+    ) -> (
+        windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS,
+        windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS,
+    ) {
         match self {
             MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
             MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),

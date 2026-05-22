@@ -56,14 +56,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassInfoExW,
-    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, LoadCursorW, PostMessageW,
-    RegisterClassExW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, UpdateLayeredWindow,
-    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HHOOK, IDC_ARROW, MSG,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE,
-    SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WH_MOUSE_LL, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, LoadCursorW, PostMessageW, RegisterClassExW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
+    TranslateMessage, UnhookWindowsHookEx, UpdateLayeredWindow, CREATESTRUCTW, CS_HREDRAW,
+    CS_VREDRAW, GWLP_USERDATA, HHOOK, IDC_ARROW, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
+    ULW_ALPHA, WH_MOUSE_LL, WM_KEYDOWN, WM_KILLFOCUS, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::Bounds;
@@ -1280,11 +1279,7 @@ fn arrowhead_polygon(start: POINT, end: POINT) -> [POINT; 3] {
 /// badges at stale positions. This hook intercepts the wheel before
 /// it reaches any window and posts [`WM_SCROLL_DISMISS`] to the
 /// overlay so `wnd_proc` can cancel the pick.
-unsafe extern "system" fn scroll_hook_proc(
-    code: i32,
-    wp: WPARAM,
-    lp: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn scroll_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if code >= 0 {
         let msg = wp.0 as u32;
         if msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL_RAW {

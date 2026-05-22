@@ -414,10 +414,8 @@ fn run_windows(cli: Cli) -> anyhow::Result<()> {
             }
         }
 
-        let tray_cmds: Vec<TrayCommand> = tray
-            .as_ref()
-            .map(|t| t.poll_commands())
-            .unwrap_or_default();
+        let tray_cmds: Vec<TrayCommand> =
+            tray.as_ref().map(|t| t.poll_commands()).unwrap_or_default();
         for cmd in tray_cmds {
             match cmd {
                 TrayCommand::OpenSettings => match settings_window::show(&config) {
