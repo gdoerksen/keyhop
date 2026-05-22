@@ -45,9 +45,13 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
-    SendMessageTimeoutW, SMTO_ABORTIFHUNG, WM_GETOBJECT,
+    SendMessageTimeoutW, SetCursorPos, SMTO_ABORTIFHUNG, WM_GETOBJECT,
 };
 
 use crate::cache::{CacheManager, WindowKey};
@@ -1004,6 +1008,16 @@ impl Backend for WindowsBackend {
             Action::Click => {
                 el.click().context("element.click() failed")?;
             }
+            // RightClick and DoubleClick can't go through UIA — context
+            // menus and double-click activation aren't expressible as
+            // UIA patterns — so we synthesize real input. See `click_at`
+            // for the SendInput details.
+            Action::RightClick => {
+                click_at(el, MouseButton::Right, 1).context("synthesizing right-click failed")?;
+            }
+            Action::DoubleClick => {
+                click_at(el, MouseButton::Left, 2).context("synthesizing double-click failed")?;
+            }
             Action::Focus => {
                 el.set_focus().context("element.set_focus() failed")?;
             }
@@ -1016,6 +1030,99 @@ impl Backend for WindowsBackend {
         }
         Ok(())
     }
+}
+
+/// Which physical mouse button [`click_at`] should synthesize. Kept
+/// here rather than in [`crate::Action`] because mapping is internal
+/// to the Windows backend — other backends might express the same
+/// intent differently.
+#[derive(Debug, Clone, Copy)]
+enum MouseButton {
+    Left,
+    Right,
+}
+
+impl MouseButton {
+    /// `(down_flag, up_flag)` for a single press of this button. We
+    /// build `MOUSEINPUT` records explicitly rather than going through
+    /// a higher-level helper because we need the down/up events to land
+    /// in a single `SendInput` batch (see [`click_at`] for why).
+    fn flags(self) -> (windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS, windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS) {
+        match self {
+            MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+            MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        }
+    }
+}
+
+/// Synthesize `count` clicks of `button` at the centre of `el`.
+///
+/// Used by [`Action::RightClick`] (count=1, Right) and
+/// [`Action::DoubleClick`] (count=2, Left). The two cases share a path
+/// because both need the same three things: locate the element, warp
+/// the cursor, and dispatch one or more down/up pairs through
+/// `SendInput`.
+///
+/// Why `SendInput` and not the `uiautomation::UIElement::click()`
+/// helper? `click()` only ever synthesizes a left-click and can't
+/// guarantee double-click timing. We need a right-button variant and
+/// we need both clicks of a double-click to land in the same input
+/// batch so the OS treats them as one gesture (i.e. inside the
+/// system's `GetDoubleClickTime` window with no scheduler jitter).
+///
+/// The cursor warp via `SetCursorPos` matters because most context
+/// menus and double-click handlers are dispatched based on the cursor
+/// position at the moment the button event fires, not on the HWND
+/// under the keyboard focus.
+fn click_at(el: &UIElement, button: MouseButton, count: u8) -> anyhow::Result<()> {
+    let bounds = el
+        .get_bounding_rectangle()
+        .context("reading element bounds for synthesized click")?;
+    // Element centre in physical pixels. `SetCursorPos` takes physical
+    // pixels too thanks to PerMonitorV2 DPI awareness (set in
+    // `Self::with_shared_cache`), so the two coordinate systems already
+    // line up.
+    let cx = bounds.get_left() + bounds.get_width() / 2;
+    let cy = bounds.get_top() + bounds.get_height() / 2;
+
+    unsafe {
+        SetCursorPos(cx, cy).context("SetCursorPos failed")?;
+    }
+
+    let (down, up) = button.flags();
+    // Pre-size for the worst case (double-click = two down/up pairs).
+    // Single click only consumes the first two entries; the rest stay
+    // initialized but never get passed to `SendInput`.
+    let mut inputs: Vec<INPUT> = Vec::with_capacity((count as usize) * 2);
+    for _ in 0..count {
+        for &flag in &[down, up] {
+            inputs.push(INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dx: 0,
+                        dy: 0,
+                        mouseData: 0,
+                        dwFlags: flag,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            });
+        }
+    }
+
+    let cb = std::mem::size_of::<INPUT>() as i32;
+    let sent = unsafe { SendInput(&inputs, cb) };
+    if (sent as usize) != inputs.len() {
+        anyhow::bail!(
+            "SendInput injected {sent} of {} events (blocked by UIPI or another input desktop)",
+            inputs.len()
+        );
+    }
+
+    tracing::debug!(?button, count, cx, cy, "synthesized click via SendInput");
+    Ok(())
 }
 
 /// Which path through [`invoke_smart`] succeeded. Surfaced via tracing so we

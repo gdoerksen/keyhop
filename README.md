@@ -122,11 +122,15 @@ After launching, `keyhop` registers two global hotkeys and a tray icon. The defa
 | --------------- | ----------------------- | ---------------------------------------------------------------------------------- |
 | Pick element    | `Ctrl + Shift + Space`  | Hints every interactable control inside the focused window. Type one to invoke it. |
 | Pick window     | `Ctrl + Alt + Space`    | Hints every visible top-level window across all monitors. Type one to focus it.    |
-| Confirm         | type the hint label     | Commits the selection.                                                             |
+| Confirm         | type the hint label     | Commits the selection (invokes the element's primary action).                      |
+| Double-click    | `Ctrl` + hint letter    | Hold Ctrl while typing the last letter to double-click instead of invoking.        |
+| Right-click     | `Shift` + hint letter   | Hold Shift while typing the last letter to open the element's context menu.        |
 | Backspace       | `Backspace`             | Drops the last typed character (inside an overlay).                                |
 | Cancel          | `Esc`                   | Dismisses the current overlay without doing anything.                              |
 | Settings        | Tray menu → Settings... | Open the visual configuration dialog.                                              |
 | Quit            | Tray menu → Quit        | Cleanly exits `keyhop`.                                                            |
+
+The modifier only needs to be held on the **last** (completing) keystroke — you don't have to hold it while typing a multi-letter label. For example, to double-click an element with the label `la`, type `l` normally, then hold `Ctrl` and press `a`. If both `Ctrl` and `Shift` are held, `Ctrl` (double-click) takes precedence.
 
 The tray icon's right-click menu mirrors the two leader chords, gives you a `Settings...` entry to customize keyhop visually, and (in release builds) a `View Log` shortcut so you can debug without leaving the keyboard.
 
@@ -276,6 +280,10 @@ fn enumerate() -> anyhow::Result<()> {
 - [x] **Smart multi-monitor badge positioning** — overlay layout now respects the source monitor's work-area, drops candidate placements that would clip across monitors, and clamps fallbacks back inside the source monitor. The element-style picker also gained an `OutsideBottom` candidate as the off-element fallback when `OutsideTop` would clip.
 - [x] **Element-tree caching** — pluggable `Clock`-driven `CacheManager` memoises each window's UIA enumeration for a tunable TTL (default 500 ms), so repeat presses on a steady screen are instant. Toggle via `[performance] enable_caching` / `cache_ttl_ms`.
 - [x] **Settings dialog gains six new controls** for hint strategy, alphabet preset + modifiers, custom additions, scope mode, max elements, caching enable, and cache TTL. Window grew to 980×560 px.
+
+### In progress (unreleased)
+
+- [x] **Modifier-aware hint actions** ([#7](https://github.com/rsaz/keyhop/issues/7)) — Ctrl + hint letter = double-click, Shift + hint letter = right-click (context menu). Modifier sampled only on the completing keystroke.
 
 ### Next up (v0.5.0) — Linux backend + signing
 

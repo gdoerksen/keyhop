@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Modifier-aware hint actions ([#7](https://github.com/rsaz/keyhop/issues/7)).** While the element-picker overlay is open, holding a modifier key on the *completing* hint keystroke changes what happens to the target element:
+    - **Ctrl + letter** — synthesizes a **double-click** at the element's centre (for file-list rows, custom controls that distinguish single from double click, etc.).
+    - **Shift + letter** — synthesizes a **right-click** at the element's centre (opens the element's context menu).
+    - **No modifier** — unchanged behaviour (UIA invoke pattern cascade with left-click fallback).
+  The modifier is sampled only on the final keystroke; intermediate prefix characters don't need to be modified, so for a two-letter hint like `la` you type `l` normally, then hold `Ctrl` and press `a`. When both Ctrl and Shift are held, Ctrl (double-click) takes precedence. The window picker ignores modifiers — focusing a window has no double-click or right-click variant.
+  Internally this adds `Action::RightClick` and `Action::DoubleClick` variants, a new `PickModifier` / `PickResult` overlay return type, and `SendInput`-based mouse synthesis (`SetCursorPos` + batched `MOUSEINPUT` events) in the Windows backend.
 - **Splash screen** — a centered 400×400 borderless window displaying the store logo is now shown during app initialization, providing visual feedback that keyhop is loading.
 - **Store logo as tray icon** — the system tray icon now uses the official store logo instead of the procedurally generated yellow "K" badge, providing a more polished appearance.
 - **Open settings hotkey** — new global hotkey (`Ctrl+Shift+,` by default) to open the Settings dialog directly from anywhere. Previously, settings could only be opened from the tray menu.
