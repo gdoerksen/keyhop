@@ -16,12 +16,14 @@
 //! │ Hints                            │ Opacity                          │
 //! │   Strategy ▼                     │   Element ━━●━━━━ 60             │
 //! │   Preset ▼                       │   Window  ━━━━━━━ 0              │
-//! │   Custom alphabet [_____]        │   [x] Draw arrow leader          │
-//! │   Custom additions [_____]       │                                  │
-//! │   [ ] Include numbers (0-9)      │ Scope                            │
-//! │   [ ] Include extended (; ')     │   Target windows ▼               │
-//! │   [x] Exclude ambiguous (O 0)    │   Max elements   [▲ 300 ▼]       │
-//! │   Min single-key  [▲ 8 ▼]        │                                  │
+//! │   Custom alphabet [_____]        │   Element badge size [▲ 26 ▼]    │
+//! │   Custom additions [_____]       │   Window badge size  [▲ 60 ▼]    │
+//! │   [ ] Include numbers (0-9)      │   [x] Draw arrow leader          │
+//! │   [ ] Include extended (; ')     │                                  │
+//! │   [x] Exclude ambiguous (O 0)    │ Scope                            │
+//! │   Min single-key  [▲ 8 ▼]        │   Target windows ▼               │
+//! │                                  │   Max elements   [▲ 300 ▼]       │
+//! │                                  │                                  │
 //! │                                  │ Performance                      │
 //! │                                  │   [x] Cache enumeration          │
 //! │                                  │   Cache TTL ms   [▲ 500 ▼]       │
@@ -155,6 +157,8 @@ const ID_MAX_ELEMENTS: usize = 1018;
 const ID_ENABLE_CACHING: usize = 1019;
 const ID_CACHE_TTL_MS: usize = 1020;
 const ID_MIN_SINGLES: usize = 1021;
+const ID_ELEMENT_FONT_SIZE: usize = 1022;
+const ID_WINDOW_FONT_SIZE: usize = 1023;
 
 // Numeric labels mirroring trackbar / spinner positions live in
 // the 1100+ range so we can update them on slider drag without an
@@ -168,6 +172,8 @@ const ID_WINDOW_OPACITY_LABEL: usize = 1101;
 const ID_MIN_SINGLES_UD: usize = 1150;
 const ID_MAX_ELEMENTS_UD: usize = 1151;
 const ID_CACHE_TTL_UD: usize = 1152;
+const ID_ELEMENT_FONT_SIZE_UD: usize = 1153;
+const ID_WINDOW_FONT_SIZE_UD: usize = 1154;
 
 // Color-picker swatch buttons. Range 1200..1209 reserved so
 // [`is_swatch_id`] stays a cheap range comparison and adding more
@@ -220,6 +226,8 @@ struct State {
     max_elements: HWND,
     enable_caching: HWND,
     cache_ttl_ms: HWND,
+    element_font_size: HWND,
+    window_font_size: HWND,
     launch_startup: HWND,
     /// Snapshot of the leader-line preference at dialog open. Used to
     /// decide whether to write `show_leader = Some(...)` or leave it as
@@ -383,6 +391,8 @@ mod tips {
     pub const MAX_ELEMENTS: &str = "Hard cap on collected elements per pick (multi-window scopes only).\n\nLower = snappier overlay; higher = more reachable targets. Active-window mode uses platform-specific caps and ignores this.";
     pub const ENABLE_CACHING: &str = "Memoize element trees per window so repeat picks (Esc, retry) skip the slow accessibility walk.\n\nDisable only when debugging stale-results bugs; the TTL already keeps drift bounded.";
     pub const CACHE_TTL: &str = "How long an element tree stays cached, in milliseconds.\n\nLower = fresher results when UI changes between picks; higher = faster repeat picks. 500 ms is a good balance.";
+    pub const ELEMENT_FONT_SIZE: &str = "Badge label height in pixels for element hints.\n\nThe suggested default is calculated from your monitor's DPI scaling. Increase for better readability on high-DPI screens; decrease for a more compact overlay.";
+    pub const WINDOW_FONT_SIZE: &str = "Badge label height in pixels for window-picker hints.\n\nThe suggested default is calculated from your monitor's DPI scaling.";
     pub const LAUNCH_STARTUP: &str = "Run keyhop automatically when you sign in to Windows. Implemented by writing to HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run.";
     pub const SAVE: &str = "Apply changes immediately and close. Hotkeys, alphabet, scope, colors, and cache are all hot-reloaded — no restart needed.";
     pub const CANCEL: &str = "Close without saving. Any pending changes are discarded.";
@@ -696,6 +706,48 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
     add_tip(tooltip, hwnd, window_opacity, tips::WINDOW_OPACITY);
     y += ROW_H;
 
+    let el_fs = if initial.colors.element.font_size > 0 {
+        initial.colors.element.font_size as i32
+    } else {
+        overlay::suggested_element_font_size()
+    };
+    create_label(hwnd, hinstance, "Element badge size:", RIGHT_LABEL_X, y);
+    let element_font_size = create_spinner(
+        hwnd,
+        hinstance,
+        ID_ELEMENT_FONT_SIZE,
+        ID_ELEMENT_FONT_SIZE_UD,
+        RIGHT_FIELD_X,
+        y,
+        80,
+        6,
+        120,
+        el_fs,
+    );
+    add_tip(tooltip, hwnd, element_font_size, tips::ELEMENT_FONT_SIZE);
+    y += ROW_H;
+
+    let win_fs = if initial.colors.window.font_size > 0 {
+        initial.colors.window.font_size as i32
+    } else {
+        overlay::suggested_window_font_size()
+    };
+    create_label(hwnd, hinstance, "Window badge size:", RIGHT_LABEL_X, y);
+    let window_font_size = create_spinner(
+        hwnd,
+        hinstance,
+        ID_WINDOW_FONT_SIZE,
+        ID_WINDOW_FONT_SIZE_UD,
+        RIGHT_FIELD_X,
+        y,
+        80,
+        10,
+        120,
+        win_fs,
+    );
+    add_tip(tooltip, hwnd, window_font_size, tips::WINDOW_FONT_SIZE);
+    y += ROW_H;
+
     let initial_show_leader = initial
         .colors
         .element
@@ -861,6 +913,8 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         max_elements,
         enable_caching,
         cache_ttl_ms,
+        element_font_size,
+        window_font_size,
         launch_startup,
         initial_show_leader,
         saved_config: None,
@@ -1563,6 +1617,10 @@ fn collect_config() -> Option<(Config, bool)> {
         } else {
             Some(show_leader_checked)
         };
+        let element_font_size =
+            unsafe { spinner_value(st.element_font_size) }.clamp(6, 120) as u8;
+        let window_font_size =
+            unsafe { spinner_value(st.window_font_size) }.clamp(10, 120) as u8;
         let launch_startup = unsafe { is_checked(st.launch_startup) };
 
         // For non-Custom presets the "custom alphabet" field is a
@@ -1611,6 +1669,7 @@ fn collect_config() -> Option<(Config, bool)> {
                     opacity: element_opacity,
                     show_leader,
                     leader_color: String::new(),
+                    font_size: element_font_size,
                 },
                 window: BadgeColors {
                     badge_bg: window_bg,
@@ -1619,6 +1678,7 @@ fn collect_config() -> Option<(Config, bool)> {
                     opacity: window_opacity,
                     show_leader,
                     leader_color: String::new(),
+                    font_size: window_font_size,
                 },
             },
             startup: StartupConfig {

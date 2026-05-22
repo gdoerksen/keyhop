@@ -192,6 +192,13 @@ pub struct BadgeColors {
     /// Optional pen color for the leader line + arrowhead, as a hex
     /// `#RRGGBB`. Empty string → use the preset default.
     pub leader_color: String,
+    /// Badge label height in pixels. `0` means "auto" — the preset
+    /// default (13 for elements, 30 for windows) is scaled by the
+    /// target monitor's DPI at pick time. Any positive value is used
+    /// as-is with no additional DPI scaling, giving the user full
+    /// control. The Settings UI pre-fills the DPI-suggested value so
+    /// users on high-DPI screens see a sensible starting point.
+    pub font_size: u8,
 }
 
 /// Windows startup integration.

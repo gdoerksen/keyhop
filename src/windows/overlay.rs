@@ -48,7 +48,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    GetDpiForMonitor, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    MDT_EFFECTIVE_DPI,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SetFocus, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_SHIFT,
@@ -198,6 +199,12 @@ pub struct HintStyle {
     /// element badges sit just above the control they label, leaving the
     /// underlying UI fully visible.
     pub prefer_inside_anchor: bool,
+    /// When `true`, `run_pick` scales `font_height` and padding by the
+    /// target monitor's DPI factor. Set automatically when the user has
+    /// not specified an explicit `font_size` in config (i.e. font_size=0).
+    /// When `false`, the `font_height` is used as-is (user chose a
+    /// concrete size).
+    pub auto_scale_dpi: bool,
 }
 
 impl HintStyle {
@@ -248,6 +255,7 @@ impl HintStyle {
             // with the smaller font this leaves the rest of the control
             // visible so the user can confirm what they're about to click.
             prefer_inside_anchor: true,
+            auto_scale_dpi: true,
         }
     }
 
@@ -280,6 +288,7 @@ impl HintStyle {
             // title bar area where it's clearly visible. `OutsideTop`
             // would push it above the monitor for any window at y == 0.
             prefer_inside_anchor: true,
+            auto_scale_dpi: true,
         }
     }
 
@@ -297,6 +306,10 @@ impl HintStyle {
         if let Some(show) = c.show_leader {
             style.show_leader = show;
         }
+        if c.font_size > 0 {
+            style.font_height = c.font_size as i32;
+            style.auto_scale_dpi = false;
+        }
         style
     }
 
@@ -310,6 +323,10 @@ impl HintStyle {
         apply_opacity_override(&mut style.badge_opacity, c.opacity);
         if let Some(show) = c.show_leader {
             style.show_leader = show;
+        }
+        if c.font_size > 0 {
+            style.font_height = c.font_size as i32;
+            style.auto_scale_dpi = false;
         }
         style
     }
@@ -835,6 +852,48 @@ fn screen_to_client_rect(rect: RECT, origin_x: i32, origin_y: i32) -> RECT {
         right: rect.right - origin_x,
         bottom: rect.bottom - origin_y,
     }
+}
+
+/// DPI scale factor for the monitor containing `bounds`. Returns 1.0 at
+/// standard 96 DPI, 1.5 at 144 DPI (150%), 2.0 at 192 DPI (200%), etc.
+/// Falls back to 1.0 when the query fails (rare virtual-display edge case).
+unsafe fn dpi_scale_for_bounds(bounds: &Bounds) -> f32 {
+    let rect = RECT {
+        left: bounds.x,
+        top: bounds.y,
+        right: bounds.x + bounds.width,
+        bottom: bounds.y + bounds.height,
+    };
+    let monitor = MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST);
+    let mut dpi_x: u32 = 96;
+    let mut dpi_y: u32 = 96;
+    let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
+    dpi_x as f32 / 96.0
+}
+
+/// DPI scale factor for the primary monitor (the one at 0,0). Used by
+/// the Settings UI to suggest a DPI-aware badge font size before any
+/// hints have been placed.
+pub fn primary_monitor_dpi_scale() -> f32 {
+    let origin = Bounds {
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+    };
+    unsafe { dpi_scale_for_bounds(&origin) }
+}
+
+/// Suggested element badge font size for the primary monitor's DPI.
+pub fn suggested_element_font_size() -> i32 {
+    let base = HintStyle::elements().font_height;
+    (base as f32 * primary_monitor_dpi_scale()).round() as i32
+}
+
+/// Suggested window badge font size for the primary monitor's DPI.
+pub fn suggested_window_font_size() -> i32 {
+    let base = HintStyle::windows().font_height;
+    (base as f32 * primary_monitor_dpi_scale()).round() as i32
 }
 
 /// True when `rect` is fully contained inside `monitor` (in the same
@@ -1479,6 +1538,19 @@ impl PersistentOverlay {
             hint_count = hints.len(),
             "overlay virtual desktop rect"
         );
+
+        let mut style = style;
+        if style.auto_scale_dpi {
+            if let Some(first) = hints.first() {
+                let scale = dpi_scale_for_bounds(&first.bounds);
+                if scale > 1.0 {
+                    style.font_height = ((style.font_height as f32) * scale).round() as i32;
+                    style.padding_x = ((style.padding_x as f32) * scale).ceil() as i32;
+                    style.padding_y = ((style.padding_y as f32) * scale).ceil() as i32;
+                    tracing::debug!(scale, font_height = style.font_height, "DPI-scaled overlay");
+                }
+            }
+        }
 
         let opacity = style.badge_opacity;
         let mut state = OverlayState::new(hints, style, vx, vy);
