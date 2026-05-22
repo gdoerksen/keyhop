@@ -6,8 +6,8 @@
 
   Customizations vs. the cargo-wix init template:
     * Display name "Keyhop" (capitalized) for ARP / Start Menu UX.
-    * Per-machine install (single Add/Remove Programs entry; UAC prompt
-      is permitted by Microsoft Store policy 10.2.9).
+    * Per-user install — no UAC prompt required. Installs to
+      %LOCALAPPDATA%\Keyhop and modifies the user PATH only.
     * Single MSI Component for the binary, plus separate Components for
       the license sidecar, the Start Menu shortcut, and the PATH entry.
     * Full ARP metadata (DisplayName / Publisher / Version /
@@ -25,11 +25,8 @@
       installed alongside the binary as a sidecar.
 -->
 
-<?if $(sys.BUILDARCH) = x64 or $(sys.BUILDARCH) = arm64 ?>
-    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
-<?else ?>
-    <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
-<?endif ?>
+<!-- Per-user install: %LOCALAPPDATA%\Keyhop — no arch-specific
+     Program Files folder needed. -->
 
 <Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
 
@@ -50,7 +47,7 @@
             InstallerVersion='450'
             Languages='1033'
             Compressed='yes'
-            InstallScope='perMachine'
+            InstallScope='perUser'
             SummaryCodepage='1252'
             />
 
@@ -94,20 +91,27 @@
         <Property Id='DiskPrompt' Value='Keyhop Installation'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
-            <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
+            <Directory Id='LocalAppDataFolder'>
                 <Directory Id='APPLICATIONFOLDER' Name='Keyhop'>
 
-                    <Component Id='License' Guid='*'>
+                    <Component Id='License' Guid='1D4E317A-41A8-4CE5-AF81-F2CC0F6126CC'>
                         <File
                             Id='LicenseFile'
                             Name='LICENSE.txt'
                             DiskId='1'
-                            Source='LICENSE-MIT'
+                            Source='LICENSE-MIT'/>
+                        <RegistryValue
+                            Root='HKCU'
+                            Key='Software\Keyhop'
+                            Name='license'
+                            Type='integer'
+                            Value='1'
                             KeyPath='yes'/>
+                        <RemoveFolder Id='RemoveApplicationFolder' On='uninstall'/>
                     </Component>
 
                     <Directory Id='Bin' Name='bin'>
-                        <Component Id='Path' Guid='B7BFAB6F-3C97-4B88-A4EE-0F292CD0D018' KeyPath='yes'>
+                        <Component Id='Path' Guid='B7BFAB6F-3C97-4B88-A4EE-0F292CD0D018'>
                             <Environment
                                 Id='PATH'
                                 Name='PATH'
@@ -115,30 +119,36 @@
                                 Permanent='no'
                                 Part='last'
                                 Action='set'
-                                System='yes'/>
+                                System='no'/>
+                            <RegistryValue
+                                Root='HKCU'
+                                Key='Software\Keyhop'
+                                Name='path'
+                                Type='integer'
+                                Value='1'
+                                KeyPath='yes'/>
                         </Component>
-                        <!--
-                          The Start Menu shortcut is nested inside the
-                          binary's <File> as an advertised shortcut. This
-                          puts the shortcut and its target file in the
-                          same MSI Component, which is what ICE69 wants
-                          and means uninstall removes both together.
-                        -->
-                        <Component Id='binary0' Guid='*'>
+                        <Component Id='binary0' Guid='71057135-C186-4C0A-8691-A57392B274D1'>
                             <File
                                 Id='exe0'
                                 Name='keyhop.exe'
                                 DiskId='1'
-                                Source='$(var.CargoTargetBinDir)\keyhop.exe'
-                                KeyPath='yes'>
-                                <Shortcut
-                                    Id='KeyhopStartMenuShortcut'
-                                    Directory='ApplicationProgramsFolder'
-                                    Name='Keyhop'
-                                    Description='System-wide keyboard navigation overlay'
-                                    WorkingDirectory='APPLICATIONFOLDER'
-                                    Advertise='yes'/>
-                            </File>
+                                Source='$(var.CargoTargetBinDir)\keyhop.exe'/>
+                            <Shortcut
+                                Id='KeyhopStartMenuShortcut'
+                                Directory='ApplicationProgramsFolder'
+                                Name='Keyhop'
+                                Description='System-wide keyboard navigation overlay'
+                                WorkingDirectory='APPLICATIONFOLDER'
+                                Target='[Bin]keyhop.exe'/>
+                            <RegistryValue
+                                Root='HKCU'
+                                Key='Software\Keyhop'
+                                Name='exe'
+                                Type='integer'
+                                Value='1'
+                                KeyPath='yes'/>
+                            <RemoveFolder Id='RemoveBinFolder' On='uninstall'/>
                         </Component>
                     </Directory>
                 </Directory>
@@ -184,7 +194,7 @@
             <Feature
                 Id='Environment'
                 Title='PATH Environment Variable'
-                Description='Adds the install location to the system PATH so `keyhop` can be invoked from any terminal (including `keyhop --close`).'
+                Description='Adds the install location to the user PATH so `keyhop` can be invoked from any terminal (including `keyhop --close`).'
                 Level='1'
                 Absent='allow'>
                 <ComponentRef Id='Path'/>
