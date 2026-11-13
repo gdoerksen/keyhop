@@ -620,8 +620,22 @@ fn build_hint_engine(config: &Config) -> (HintEngine, isize) {
     let layout = keyhop::Layout::resolve(config.keyboard.layout, detected);
     let alphabet = keyhop::alphabet_presets::build_alphabet_for(&config.hints, &layout);
     tracing::debug!(%alphabet, "hint alphabet resolved");
+    // Finger per alphabet character. Characters the layout doesn't have
+    // are typed via their QWERTY key (see `keyboard_layout::key_chars`),
+    // so look them up on QWERTY.
+    let qwerty = keyhop::Layout::qwerty();
+    let fingers = alphabet
+        .chars()
+        .map(|c| {
+            layout
+                .key_of(c)
+                .or_else(|| qwerty.key_of(c))
+                .map(|k| config.keyboard.geometry.finger(k))
+        })
+        .collect();
     let engine = HintEngine::with_strategy(&alphabet, config.hints.strategy)
-        .with_min_singles(config.hints.min_singles);
+        .with_min_singles(config.hints.min_singles)
+        .with_key_rule(config.hints.consecutive_keys, fingers);
     (engine, layout_id)
 }
 

@@ -18,6 +18,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::keyboard::Finger;
+
 /// Default home-row alphabet, ordered by typing comfort for QWERTY layouts.
 pub const DEFAULT_ALPHABET: &str = "asdfghjkl";
 
@@ -38,6 +40,24 @@ pub enum HintStrategy {
     FixedLength,
 }
 
+/// Which consecutive key pairs labels may contain. Typing the same key
+/// twice in a row — or two keys with the same finger — means lifting and
+/// re-striking with one finger, which is slower than alternating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsecutiveKeys {
+    /// Any pair is allowed (the original behaviour).
+    Allow,
+    /// Never the same key twice in a row (`ll`, `lla`).
+    NoRepeat,
+    /// Never the same key twice, nor two keys typed by the same finger
+    /// (`fg`, `hj` on QWERTY). Fingers come from the keyboard layout +
+    /// geometry (see [`crate::keyboard`]); characters with no known finger
+    /// only get the same-key check.
+    #[default]
+    NoSameFinger,
+}
+
 /// Produces short label strings for a given number of targets.
 #[derive(Debug, Clone)]
 pub struct HintEngine {
@@ -46,6 +66,10 @@ pub struct HintEngine {
     /// Minimum length-1 hints to guarantee on every scene. See
     /// [`Self::with_min_singles`] for the trade-off.
     min_singles: usize,
+    /// Consecutive-key rule. See [`Self::with_key_rule`].
+    key_rule: ConsecutiveKeys,
+    /// Finger for each alphabet character (parallel to `alphabet`).
+    fingers: Vec<Option<Finger>>,
 }
 
 impl Default for HintEngine {
@@ -79,7 +103,29 @@ impl HintEngine {
             alphabet: alphabet.chars().collect(),
             strategy,
             min_singles: 0,
+            key_rule: ConsecutiveKeys::Allow,
+            fingers: Vec::new(),
         }
+    }
+
+    /// Forbid repeated (and optionally same-finger) consecutive keys in
+    /// multi-character labels. `fingers` gives the finger for each
+    /// alphabet character, in alphabet order; missing entries or `None`
+    /// mean "unknown finger" (same-key check only).
+    ///
+    /// Defaults to [`ConsecutiveKeys::Allow`]. If the rule can't be met
+    /// for some character — e.g. alphabet `"fg"` where both keys share a
+    /// finger — generation relaxes to [`ConsecutiveKeys::NoRepeat`], then
+    /// to [`ConsecutiveKeys::Allow`], rather than run out of labels.
+    pub fn with_key_rule(mut self, rule: ConsecutiveKeys, fingers: Vec<Option<Finger>>) -> Self {
+        self.key_rule = rule;
+        self.fingers = fingers;
+        self
+    }
+
+    /// Return the configured consecutive-key rule.
+    pub fn key_rule(&self) -> ConsecutiveKeys {
+        self.key_rule
     }
 
     /// Override the minimum-single-hints guarantee. Defaults to `0`
@@ -126,6 +172,17 @@ impl HintEngine {
     pub fn generate(&self, count: usize) -> Vec<String> {
         if count == 0 {
             return Vec::new();
+        }
+        for succ in self.successor_tables() {
+            let labels = match self.strategy {
+                HintStrategy::FixedLength => self.generate_fixed_constrained(count, &succ),
+                HintStrategy::ShortestFirst => {
+                    self.generate_shortest_first_constrained(count, &succ)
+                }
+            };
+            if let Some(labels) = labels {
+                return labels;
+            }
         }
         match self.strategy {
             HintStrategy::FixedLength => self.generate_fixed(count),
@@ -315,6 +372,155 @@ impl HintEngine {
         out
     }
 
+    /// Successor tables to try, strictest first: for each alphabet index,
+    /// the indices that may follow it under [`Self::key_rule`] and then
+    /// each weaker rule. Tables where some character has no successor are
+    /// skipped. Empty means no restriction applies (use the unconstrained
+    /// allocators); [`Self::generate`] also falls back to those when no
+    /// table can produce enough labels.
+    fn successor_tables(&self) -> Vec<Vec<Vec<usize>>> {
+        let n = self.alphabet.len();
+        let ladder: &[ConsecutiveKeys] = match self.key_rule {
+            ConsecutiveKeys::Allow => return Vec::new(),
+            ConsecutiveKeys::NoRepeat => &[ConsecutiveKeys::NoRepeat],
+            ConsecutiveKeys::NoSameFinger => {
+                &[ConsecutiveKeys::NoSameFinger, ConsecutiveKeys::NoRepeat]
+            }
+        };
+        ladder
+            .iter()
+            .map(|&rule| {
+                (0..n)
+                    .map(|i| (0..n).filter(|&j| self.can_follow(rule, i, j)).collect())
+                    .collect::<Vec<Vec<usize>>>()
+            })
+            .filter(|succ| succ.iter().all(|s| !s.is_empty()))
+            .collect()
+    }
+
+    fn can_follow(&self, rule: ConsecutiveKeys, i: usize, j: usize) -> bool {
+        if self.alphabet[i] == self.alphabet[j] {
+            return false;
+        }
+        if rule == ConsecutiveKeys::NoSameFinger {
+            let finger = |k: usize| self.fingers.get(k).copied().flatten();
+            if let (Some(a), Some(b)) = (finger(i), finger(j)) {
+                return a != b;
+            }
+        }
+        true
+    }
+
+    /// Shortest-first allocation where only paths through `succ` are
+    /// valid labels. Same contract as [`Self::generate_shortest_first`]:
+    /// prefix-free, shortest labels first, forced singles honoured, and
+    /// at most two lengths among the multi-character labels.
+    ///
+    /// Because branching is uneven (each character has its own number of
+    /// allowed successors), the closed-form Vimium split doesn't apply.
+    /// Instead we grow the label tree level by level until the deepest
+    /// level `L` holds enough labels, then "demote" length-`L−1` nodes to
+    /// labels themselves: each demotion costs its `kids − 1` surplus
+    /// slots. Nodes with the fewest kids are demoted first, which
+    /// maximises the number of shorter labels for the available surplus.
+    ///
+    /// Returns `None` when the table can't produce `count` labels at all
+    /// (e.g. alphabet `"fg"` under no-repeat only ever yields `fgfg…`).
+    fn generate_shortest_first_constrained(
+        &self,
+        count: usize,
+        succ: &[Vec<usize>],
+    ) -> Option<Vec<String>> {
+        let n = self.alphabet.len();
+        if count <= n {
+            return Some((0..count).map(|i| self.encode(i, 1)).collect());
+        }
+
+        let vimium_natural_singles = vimium_natural_short_count_at_length_one(count, n);
+        let forced = self
+            .min_singles
+            .max(vimium_natural_singles)
+            .min(n - 1)
+            .min(count);
+        let remaining = count - forced;
+
+        let mut out: Vec<String> = (0..forced).map(|i| self.encode(i, 1)).collect();
+
+        // `prev` = level L-1, `cur` = level L. With forced singles the
+        // length-1 prefixes aren't labels themselves, so we start at L=2
+        // and never demote back to length 1.
+        let roots: Vec<Vec<usize>> = (forced..n).map(|i| vec![i]).collect();
+        let (mut prev, mut cur) = if forced == 0 {
+            (Vec::new(), roots)
+        } else {
+            let next = expand(&roots, succ);
+            (roots, next)
+        };
+        let mut demotable = false;
+        let mut stalled = 0;
+        while cur.len() < remaining {
+            let next = grow(&cur, succ, &mut stalled, n)?;
+            prev = std::mem::replace(&mut cur, next);
+            demotable = true;
+        }
+
+        if !demotable {
+            out.extend(cur.iter().take(remaining).map(|p| self.path_to_string(p)));
+            return Some(out);
+        }
+
+        let mut surplus = cur.len() - remaining;
+        let mut order: Vec<usize> = (0..prev.len()).collect();
+        order.sort_by_key(|&i| succ[*prev[i].last().unwrap()].len());
+        let mut demoted = vec![false; prev.len()];
+        for i in order {
+            let cost = succ[*prev[i].last().unwrap()].len() - 1;
+            if cost <= surplus {
+                demoted[i] = true;
+                surplus -= cost;
+            }
+        }
+
+        let shorts = prev
+            .iter()
+            .zip(&demoted)
+            .filter(|(_, d)| **d)
+            .map(|(p, _)| p.clone());
+        let longs = prev
+            .iter()
+            .zip(&demoted)
+            .filter(|(_, d)| !**d)
+            .flat_map(|(p, _)| children(p, succ));
+        out.extend(
+            shorts
+                .chain(longs)
+                .take(remaining)
+                .map(|p| self.path_to_string(&p)),
+        );
+        Some(out)
+    }
+
+    /// Fixed-length allocation over `succ`: the smallest `L` whose valid
+    /// labels cover `count`, first `count` of them in alphabet order.
+    fn generate_fixed_constrained(&self, count: usize, succ: &[Vec<usize>]) -> Option<Vec<String>> {
+        let n = self.alphabet.len();
+        let mut cur: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+        let mut stalled = 0;
+        while cur.len() < count {
+            cur = grow(&cur, succ, &mut stalled, n)?;
+        }
+        Some(
+            cur.iter()
+                .take(count)
+                .map(|p| self.path_to_string(p))
+                .collect(),
+        )
+    }
+
+    fn path_to_string(&self, path: &[usize]) -> String {
+        path.iter().map(|&i| self.alphabet[i]).collect()
+    }
+
     fn encode(&self, mut idx: usize, len: usize) -> String {
         let n = self.alphabet.len();
         let mut chars = vec![self.alphabet[0]; len];
@@ -324,6 +530,45 @@ impl HintEngine {
         }
         chars.into_iter().collect()
     }
+}
+
+/// All one-character extensions of `path` allowed by `succ`.
+fn children<'a>(
+    path: &'a [usize],
+    succ: &'a [Vec<usize>],
+) -> impl Iterator<Item = Vec<usize>> + 'a {
+    let last = *path.last().expect("paths are non-empty");
+    succ[last].iter().map(move |&j| {
+        let mut p = path.to_vec();
+        p.push(j);
+        p
+    })
+}
+
+/// The next tree level: every child of every node, in order.
+fn expand(level: &[Vec<usize>], succ: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    level.iter().flat_map(|p| children(p, succ)).collect()
+}
+
+/// Expand one level, giving up (`None`) once the level has failed to grow
+/// for `n` consecutive steps — every path then has a single successor
+/// and longer labels can never add capacity.
+fn grow(
+    level: &[Vec<usize>],
+    succ: &[Vec<usize>],
+    stalled: &mut usize,
+    n: usize,
+) -> Option<Vec<Vec<usize>>> {
+    let next = expand(level, succ);
+    if next.len() > level.len() {
+        *stalled = 0;
+    } else {
+        *stalled += 1;
+        if *stalled > n {
+            return None;
+        }
+    }
+    Some(next)
 }
 
 /// Saturating integer power. `n.pow(0) == 1`, `n.pow(k) == n*n*...` k
@@ -374,7 +619,172 @@ fn vimium_natural_short_count_at_length_one(count: usize, n: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keyboard::{Geometry, Layout};
     use std::collections::HashSet;
+
+    fn fingers_for(alphabet: &str, layout: &Layout, geometry: Geometry) -> Vec<Option<Finger>> {
+        alphabet
+            .chars()
+            .map(|c| layout.key_of(c).map(|k| geometry.finger(k)))
+            .collect()
+    }
+
+    fn default_app_engine() -> HintEngine {
+        HintEngine::new(DEFAULT_ALPHABET)
+            .with_min_singles(8)
+            .with_key_rule(
+                ConsecutiveKeys::NoSameFinger,
+                fingers_for(DEFAULT_ALPHABET, &Layout::qwerty(), Geometry::Staggered),
+            )
+    }
+
+    fn assert_valid(labels: &[String], count: usize, ok_pair: impl Fn(char, char) -> bool) {
+        assert_eq!(labels.len(), count);
+        let set: HashSet<_> = labels.iter().collect();
+        assert_eq!(set.len(), count, "duplicate labels at count={count}");
+        for a in labels {
+            for b in labels {
+                if a != b {
+                    assert!(!b.starts_with(a.as_str()), "{a} is a prefix of {b}");
+                }
+            }
+            let chars: Vec<char> = a.chars().collect();
+            for w in chars.windows(2) {
+                assert!(ok_pair(w[0], w[1]), "bad pair in {a}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_same_finger_default_has_no_violations() {
+        let e = default_app_engine();
+        let q = Layout::qwerty();
+        let finger = |c: char| Geometry::Staggered.finger(q.key_of(c).unwrap());
+        for count in [10, 17, 18, 50, 100, 300, 500] {
+            let labels = e.generate(count);
+            assert_valid(&labels, count, |a, b| a != b && finger(a) != finger(b));
+        }
+    }
+
+    #[test]
+    fn no_same_finger_keeps_two_lengths_and_single_keys() {
+        let e = default_app_engine();
+        for count in [10, 17, 50, 100, 300] {
+            let labels = e.generate(count);
+            let singles = labels.iter().filter(|l| l.len() == 1).count();
+            assert_eq!(singles, 8, "count={count}");
+            let mut lens: Vec<usize> = labels
+                .iter()
+                .filter(|l| l.len() > 1)
+                .map(|l| l.len())
+                .collect();
+            lens.sort_unstable();
+            lens.dedup();
+            assert!(lens.len() <= 2, "count={count} lengths={lens:?}");
+        }
+    }
+
+    #[test]
+    fn no_same_finger_shortest_labels_come_first() {
+        let labels = default_app_engine().generate(100);
+        let lens: Vec<usize> = labels.iter().map(|l| l.len()).collect();
+        let mut sorted = lens.clone();
+        sorted.sort_unstable();
+        assert_eq!(lens, sorted);
+    }
+
+    #[test]
+    fn no_same_finger_default_examples() {
+        // 8 singles a..k; 'l' (right ring) can't be followed by 'l', and
+        // nothing else on the home row shares its finger.
+        let labels = default_app_engine().generate(16);
+        assert_eq!(
+            labels,
+            vec![
+                "a", "s", "d", "f", "g", "h", "j", "k", "la", "ls", "ld", "lf", "lg", "lh", "lj",
+                "lk"
+            ]
+        );
+        assert!(!default_app_engine()
+            .generate(300)
+            .iter()
+            .any(|l| l.contains("fg")
+                || l.contains("gf")
+                || l.contains("hj")
+                || l.contains("jh")
+                || l.contains("ll")));
+    }
+
+    #[test]
+    fn no_repeat_allows_same_finger_but_not_doubles() {
+        let e = HintEngine::new(DEFAULT_ALPHABET).with_key_rule(ConsecutiveKeys::NoRepeat, vec![]);
+        let labels = e.generate(80);
+        assert_valid(&labels, 80, |a, b| a != b);
+        assert!(labels.iter().any(|l| l.contains("fg")));
+    }
+
+    #[test]
+    fn allow_rule_matches_legacy_output() {
+        let legacy = HintEngine::new(DEFAULT_ALPHABET).with_min_singles(8);
+        let allow = HintEngine::new(DEFAULT_ALPHABET)
+            .with_min_singles(8)
+            .with_key_rule(ConsecutiveKeys::Allow, vec![]);
+        for count in [5, 10, 17, 50, 300] {
+            assert_eq!(legacy.generate(count), allow.generate(count));
+        }
+        assert!(legacy.generate(17).contains(&"ll".to_string()));
+    }
+
+    #[test]
+    fn unsatisfiable_finger_rule_relaxes_instead_of_failing() {
+        // 'f', 'g', 'r' are all left-index keys: under NoSameFinger none
+        // has a successor, so we relax to NoRepeat.
+        let q = Layout::qwerty();
+        let e = HintEngine::new("fgr").with_key_rule(
+            ConsecutiveKeys::NoSameFinger,
+            fingers_for("fgr", &q, Geometry::Staggered),
+        );
+        let labels = e.generate(7);
+        assert_valid(&labels, 7, |a, b| a != b);
+        // "fg" under NoRepeat only ever yields fgfg…, which can't hold 5
+        // prefix-free labels: relax all the way to Allow.
+        let e = HintEngine::new("fg").with_key_rule(ConsecutiveKeys::NoRepeat, vec![]);
+        assert_valid(&e.generate(5), 5, |_, _| true);
+        // n == 1 can't avoid repeats at all: falls back to Allow.
+        let e = HintEngine::new("a").with_key_rule(ConsecutiveKeys::NoRepeat, vec![]);
+        assert_eq!(e.generate(3), vec!["a", "aa", "aaa"]);
+    }
+
+    #[test]
+    fn fixed_length_constrained_is_uniform_and_valid() {
+        let e = HintEngine::with_strategy(DEFAULT_ALPHABET, HintStrategy::FixedLength)
+            .with_key_rule(ConsecutiveKeys::NoRepeat, vec![]);
+        let labels = e.generate(100);
+        assert!(labels.iter().all(|l| l.len() == 3));
+        assert_valid(&labels, 100, |a, b| a != b);
+    }
+
+    #[test]
+    fn no_forced_singles_path_is_valid() {
+        let e = HintEngine::new(DEFAULT_ALPHABET).with_key_rule(ConsecutiveKeys::NoRepeat, vec![]);
+        for count in [10, 40, 72, 73, 200] {
+            assert_valid(&e.generate(count), count, |a, b| a != b);
+        }
+    }
+
+    #[test]
+    fn finger_rule_follows_layout() {
+        // On Dvorak the home row is aoeuidhtn; 'u' and 'i' share the left
+        // index finger, so "ui" must never appear.
+        let alphabet = "aoeuidhtn";
+        let e = HintEngine::new(alphabet).with_min_singles(8).with_key_rule(
+            ConsecutiveKeys::NoSameFinger,
+            fingers_for(alphabet, &Layout::dvorak(), Geometry::Staggered),
+        );
+        let labels = e.generate(200);
+        assert!(!labels.iter().any(|l| l.contains("ui") || l.contains("iu")));
+        assert!(!labels.iter().any(|l| l.contains("dh") || l.contains("hd")));
+    }
 
     #[test]
     fn empty_count_returns_empty() {

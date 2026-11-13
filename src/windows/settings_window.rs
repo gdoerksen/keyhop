@@ -22,7 +22,8 @@
 //! │   [ ] Include numbers (0-9)      │                                  │
 //! │   [ ] Include extended (; ')     │ Scope                            │
 //! │   [x] Exclude ambiguous (O 0)    │   Target windows ▼               │
-//! │   Min single-key  [▲ 8 ▼]        │   Max elements   [▲ 300 ▼]       │
+//! │   Min single-key  [▲ 8 ▼]        │
+//! │   Consecutive keys ▼             │   Max elements   [▲ 300 ▼]       │
 //! │                                  │                                  │
 //! │                                  │ Performance                      │
 //! │                                  │   [x] Cache enumeration          │
@@ -101,7 +102,7 @@ use crate::config::{
     AlphabetPreset, BadgeColors, ColorConfig, Config, HintConfig, HotkeyBindings, KeyboardConfig,
     PerformanceConfig, ScopeConfig, ScopeMode, StartupConfig,
 };
-use crate::hint::{HintStrategy, DEFAULT_ALPHABET};
+use crate::hint::{ConsecutiveKeys, HintStrategy, DEFAULT_ALPHABET};
 use crate::keyboard::{Geometry, Layout, LayoutChoice, ALL_LAYOUT_CHOICES};
 use crate::layout_order::HintOrder;
 use crate::windows::{hotkey, keyboard_layout, notification, overlay, startup};
@@ -169,6 +170,7 @@ const ID_WINDOW_FONT_SIZE: usize = 1023;
 const ID_HINT_ORDER: usize = 1024;
 const ID_KEYBOARD_LAYOUT: usize = 1025;
 const ID_KEYBOARD_GEOMETRY: usize = 1026;
+const ID_CONSECUTIVE_KEYS: usize = 1027;
 
 // Numeric labels mirroring trackbar / spinner positions live in
 // the 1100+ range so we can update them on slider drag without an
@@ -213,6 +215,16 @@ const ORDER_OPTIONS: &[(HintOrder, &str)] = &[
     (HintOrder::Reading, "Reading order (top-left first)"),
 ];
 
+/// Consecutive-keys dropdown entries, stable index → enum mapping.
+const CONSECUTIVE_OPTIONS: &[(ConsecutiveKeys, &str)] = &[
+    (
+        ConsecutiveKeys::NoSameFinger,
+        "No repeats or same finger (recommended)",
+    ),
+    (ConsecutiveKeys::NoRepeat, "No repeated keys"),
+    (ConsecutiveKeys::Allow, "Allow any keys"),
+];
+
 /// Keyboard-type dropdown entries, stable index → enum mapping.
 const GEOMETRY_OPTIONS: &[(Geometry, &str)] = &[
     (Geometry::Staggered, "Standard (staggered)"),
@@ -248,6 +260,7 @@ struct State {
     alphabet_preset: HWND,
     keyboard_layout: HWND,
     keyboard_geometry: HWND,
+    consecutive_keys: HWND,
     /// Windows layout captured when the dialog opened (for `Auto`).
     detected_layout: Option<Layout>,
     include_numbers: HWND,
@@ -441,6 +454,7 @@ mod tips {
     pub const WINDOW_OPACITY: &str =
         "Window badge transparency.\n\n0 = use the preset default (90%).\n100 = fully opaque.";
     pub const SHOW_LEADER: &str = "Draw a thin colored arrow from each badge to its target element. Useful when badges are stacked or far from their target.";
+    pub const CONSECUTIVE_KEYS: &str = "Which key pairs two- and three-key labels may contain. Pressing the same key twice, or two keys with the same finger, means lifting and re-striking one finger, which is slower than alternating.\n\n• No repeats or same finger: never `ll` or `fg`. Fingers follow the Keyboard section.\n• No repeated keys: never `ll`.\n• Allow any keys: the original labels (a few more short labels on busy screens).";
     pub const KEYBOARD_LAYOUT: &str = "Which keyboard layout hint keys are chosen for.\n\n• Auto — follow the active Windows layout (works with any installed layout).\n• A named layout — use this when your keyboard remaps keys in its firmware while Windows stays on QWERTY.";
     pub const KEYBOARD_GEOMETRY: &str = "The physical shape of your keyboard. Used to work out which finger types each key.\n\n• Standard — ordinary laptop/desktop keyboard.\n• Angle mod — left bottom row shifted one finger toward the pinky.\n• Ortholinear / split ergo — keys in straight columns.";
     pub const SCOPE: &str = "Which set of windows the element picker enumerates.\n\n• Active window only — fastest; legacy behaviour.\n• Active monitor — every visible window on the cursor's monitor.\n• All visible windows — every monitor; broadest reach, slowest.";
@@ -678,6 +692,23 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         initial.hints.min_singles as i32,
     );
     add_tip(tooltip, hwnd, min_singles, tips::MIN_SINGLES);
+    y += ROW_H;
+
+    create_label(hwnd, hinstance, "Consecutive keys:", LEFT_LABEL_X, y);
+    let consecutive_keys = create_combo(
+        hwnd,
+        hinstance,
+        CONSECUTIVE_OPTIONS.iter().map(|(_, label)| *label),
+        CONSECUTIVE_OPTIONS
+            .iter()
+            .position(|(c, _)| *c == initial.hints.consecutive_keys)
+            .unwrap_or(0),
+        ID_CONSECUTIVE_KEYS,
+        LEFT_FIELD_X,
+        y,
+        LEFT_FIELD_W,
+    );
+    add_tip(tooltip, hwnd, consecutive_keys, tips::CONSECUTIVE_KEYS);
 
     // ──────────────── RIGHT COLUMN ────────────────
     let mut y = PADDING;
@@ -1021,6 +1052,7 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         alphabet_preset,
         keyboard_layout,
         keyboard_geometry,
+        consecutive_keys,
         detected_layout,
         include_numbers,
         include_extended,
@@ -1758,6 +1790,10 @@ fn collect_config() -> Option<(Config, bool)> {
             .get(order_idx)
             .map(|(o, _)| *o)
             .unwrap_or_default();
+        let consecutive_keys = CONSECUTIVE_OPTIONS
+            .get(unsafe { combo_selection(st.consecutive_keys) })
+            .map(|(c, _)| *c)
+            .unwrap_or_default();
         let layout_choice = unsafe { selected_layout_choice(st) };
         let geometry = GEOMETRY_OPTIONS
             .get(unsafe { combo_selection(st.keyboard_geometry) })
@@ -1816,6 +1852,7 @@ fn collect_config() -> Option<(Config, bool)> {
             custom_additions,
             min_singles,
             order,
+            consecutive_keys,
         };
         // Materialise the preset choices into a concrete alphabet
         // string before we save. This way `config.toml` always has a

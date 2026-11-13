@@ -34,7 +34,7 @@ pub mod windows;
 pub use action::Action;
 pub use backend::Backend;
 pub use config::Config;
-pub use hint::{HintEngine, HintStrategy, DEFAULT_ALPHABET};
+pub use hint::{ConsecutiveKeys, HintEngine, HintStrategy, DEFAULT_ALPHABET};
 pub use keyboard::{Geometry, Layout, LayoutChoice};
 pub use layout_order::HintOrder;
 pub use model::{Bounds, Element, ElementId, Role};
