@@ -68,8 +68,13 @@ pub struct HintEngine {
     min_singles: usize,
     /// Consecutive-key rule. See [`Self::with_key_rule`].
     key_rule: ConsecutiveKeys,
-    /// Finger for each alphabet character (parallel to `alphabet`).
-    fingers: Vec<Option<Finger>>,
+    /// Fingers that may type each alphabet character (parallel to
+    /// `alphabet`; empty = unknown).
+    fingers: Vec<&'static [Finger]>,
+    /// Successor tables derived from `key_rule` + `fingers`, strictest
+    /// first (see [`Self::successor_tables`]). Built once in
+    /// [`Self::with_key_rule`].
+    succ_tables: Vec<Vec<Vec<usize>>>,
 }
 
 impl Default for HintEngine {
@@ -105,21 +110,26 @@ impl HintEngine {
             min_singles: 0,
             key_rule: ConsecutiveKeys::Allow,
             fingers: Vec::new(),
+            succ_tables: Vec::new(),
         }
     }
 
     /// Forbid repeated (and optionally same-finger) consecutive keys in
-    /// multi-character labels. `fingers` gives the finger for each
-    /// alphabet character, in alphabet order; missing entries or `None`
-    /// mean "unknown finger" (same-key check only).
+    /// multi-character labels. `fingers` gives the fingers that may type
+    /// each alphabet character, in alphabet order (usually one; two for
+    /// keys typists split between hands, see
+    /// [`crate::keyboard::Geometry::fingers`]). Missing or empty entries
+    /// mean "unknown finger" (same-key check only). Two keys clash when
+    /// their finger sets overlap.
     ///
     /// Defaults to [`ConsecutiveKeys::Allow`]. If the rule can't be met
     /// for some character — e.g. alphabet `"fg"` where both keys share a
     /// finger — generation relaxes to [`ConsecutiveKeys::NoRepeat`], then
     /// to [`ConsecutiveKeys::Allow`], rather than run out of labels.
-    pub fn with_key_rule(mut self, rule: ConsecutiveKeys, fingers: Vec<Option<Finger>>) -> Self {
+    pub fn with_key_rule(mut self, rule: ConsecutiveKeys, fingers: Vec<&'static [Finger]>) -> Self {
         self.key_rule = rule;
         self.fingers = fingers;
+        self.succ_tables = self.successor_tables();
         self
     }
 
@@ -173,11 +183,11 @@ impl HintEngine {
         if count == 0 {
             return Vec::new();
         }
-        for succ in self.successor_tables() {
+        for succ in &self.succ_tables {
             let labels = match self.strategy {
-                HintStrategy::FixedLength => self.generate_fixed_constrained(count, &succ),
+                HintStrategy::FixedLength => self.generate_fixed_constrained(count, succ),
                 HintStrategy::ShortestFirst => {
-                    self.generate_shortest_first_constrained(count, &succ)
+                    self.generate_shortest_first_constrained(count, succ)
                 }
             };
             if let Some(labels) = labels {
@@ -403,10 +413,9 @@ impl HintEngine {
             return false;
         }
         if rule == ConsecutiveKeys::NoSameFinger {
-            let finger = |k: usize| self.fingers.get(k).copied().flatten();
-            if let (Some(a), Some(b)) = (finger(i), finger(j)) {
-                return a != b;
-            }
+            let fingers = |k: usize| self.fingers.get(k).copied().unwrap_or(&[]);
+            let (a, b) = (fingers(i), fingers(j));
+            return !a.iter().any(|f| b.contains(f));
         }
         true
     }
@@ -426,6 +435,13 @@ impl HintEngine {
     ///
     /// Returns `None` when the table can't produce `count` labels at all
     /// (e.g. alphabet `"fg"` under no-repeat only ever yields `fgfg…`).
+    ///
+    /// The single-key count is searched rather than taken from the
+    /// unconstrained Vimium formula: that formula assumes `n` successors
+    /// per prefix, so under the rule it can reserve one single too many
+    /// and push a few labels a key longer. We try every count between the
+    /// `min_singles` floor and the formula's value and keep the allocation
+    /// with the fewest total keystrokes (ties favour more singles).
     fn generate_shortest_first_constrained(
         &self,
         count: usize,
@@ -435,13 +451,33 @@ impl HintEngine {
         if count <= n {
             return Some((0..count).map(|i| self.encode(i, 1)).collect());
         }
-
-        let vimium_natural_singles = vimium_natural_short_count_at_length_one(count, n);
-        let forced = self
+        let cap = |f: usize| f.min(n - 1).min(count);
+        let floor = cap(self.min_singles);
+        let ceiling = cap(self
             .min_singles
-            .max(vimium_natural_singles)
-            .min(n - 1)
-            .min(count);
+            .max(vimium_natural_short_count_at_length_one(count, n)));
+        let total_len = |labels: &[String]| labels.iter().map(|l| l.chars().count()).sum::<usize>();
+        let mut best: Option<(usize, Vec<String>)> = None;
+        for forced in floor..=ceiling {
+            let Some(labels) = self.constrained_with_singles(count, succ, forced) else {
+                continue;
+            };
+            let cost = total_len(&labels);
+            if best.as_ref().map_or(true, |(c, _)| cost <= *c) {
+                best = Some((cost, labels));
+            }
+        }
+        best.map(|(_, labels)| labels)
+    }
+
+    /// One constrained allocation with exactly `forced` single-key labels.
+    fn constrained_with_singles(
+        &self,
+        count: usize,
+        succ: &[Vec<usize>],
+        forced: usize,
+    ) -> Option<Vec<String>> {
+        let n = self.alphabet.len();
         let remaining = count - forced;
 
         let mut out: Vec<String> = (0..forced).map(|i| self.encode(i, 1)).collect();
@@ -622,10 +658,10 @@ mod tests {
     use crate::keyboard::{Geometry, Layout};
     use std::collections::HashSet;
 
-    fn fingers_for(alphabet: &str, layout: &Layout, geometry: Geometry) -> Vec<Option<Finger>> {
+    fn fingers_for(alphabet: &str, layout: &Layout, geometry: Geometry) -> Vec<&'static [Finger]> {
         alphabet
             .chars()
-            .map(|c| layout.key_of(c).map(|k| geometry.finger(k)))
+            .map(|c| layout.key_of(c).map_or(&[][..], |k| geometry.fingers(k)))
             .collect()
     }
 
@@ -770,6 +806,41 @@ mod tests {
         for count in [10, 40, 72, 73, 200] {
             assert_valid(&e.generate(count), count, |a, b| a != b);
         }
+    }
+
+    #[test]
+    fn singles_count_avoids_needless_three_key_labels() {
+        // 18 keys, min_singles 4, 100 targets, no-repeat: the unconstrained
+        // formula would force 13 singles, leaving 5 x 17 = 85 two-key slots
+        // for 87 targets (3 labels of length 3). 12 singles fit all at 2.
+        let e = HintEngine::new("asdfghjkl;'qwertyu")
+            .with_min_singles(4)
+            .with_key_rule(ConsecutiveKeys::NoRepeat, vec![]);
+        let labels = e.generate(100);
+        assert_valid(&labels, 100, |a, b| a != b);
+        assert_eq!(labels.iter().map(|l| l.len()).max(), Some(2));
+    }
+
+    #[test]
+    fn diagonal_b_clashes_with_both_index_fingers_on_staggered() {
+        let alphabet = "bfj";
+        let q = Layout::qwerty();
+        let staggered = HintEngine::new(alphabet).with_key_rule(
+            ConsecutiveKeys::NoSameFinger,
+            fingers_for(alphabet, &q, Geometry::Staggered),
+        );
+        // Every pair clashes, so it relaxes to no-repeat (bf, bj, …).
+        assert!(staggered
+            .generate(5)
+            .iter()
+            .any(|l| ["bf", "fb", "bj", "jb"].iter().any(|p| l.contains(p))));
+        let ortho = HintEngine::new(alphabet).with_key_rule(
+            ConsecutiveKeys::NoSameFinger,
+            fingers_for(alphabet, &q, Geometry::Ortho),
+        );
+        let labels = ortho.generate(5);
+        assert!(!labels.iter().any(|l| l.contains("bf") || l.contains("fb")));
+        assert!(labels.iter().any(|l| l.contains("bj") || l.contains("jb")));
     }
 
     #[test]

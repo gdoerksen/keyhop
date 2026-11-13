@@ -22,17 +22,12 @@
 //! │   [ ] Include numbers (0-9)      │                                  │
 //! │   [ ] Include extended (; ')     │ Scope                            │
 //! │   [x] Exclude ambiguous (O 0)    │   Target windows ▼               │
-//! │   Min single-key  [▲ 8 ▼]        │
-//! │   Consecutive keys ▼             │   Max elements   [▲ 300 ▼]       │
-//! │                                  │                                  │
+//! │   Min single-key  [▲ 8 ▼]        │   Max elements   [▲ 300 ▼]       │
+//! │   Consecutive keys ▼             │                                  │
 //! │                                  │ Performance                      │
-//! │                                  │   [x] Cache enumeration          │
-//! │                                  │   Cache TTL ms   [▲ 500 ▼]       │
-//! │                                  │                                  │
-//! │                                  │ Keyboard                         │
-//! │                                  │   Layout ▼                       │
-//! │                                  │   Keyboard type ▼                │
-//! │                                  │                                  │
+//! │ Keyboard                         │   [x] Cache enumeration          │
+//! │   Layout ▼                       │   Cache TTL ms   [▲ 500 ▼]       │
+//! │   Keyboard type ▼                │                                  │
 //! │                                  │ [x] Launch keyhop at startup     │
 //! ├──────────────────────────────────┴──────────────────────────────────┤
 //! │              [Save]   [Cancel]   [Reset to Defaults]                │
@@ -110,7 +105,7 @@ use crate::windows::{hotkey, keyboard_layout, notification, overlay, startup};
 // ──────────────────── Layout constants ────────────────────
 
 const WINDOW_W: i32 = 860;
-const WINDOW_H: i32 = 740;
+const WINDOW_H: i32 = 680;
 const PADDING: i32 = 14;
 
 /// Standard row height (control + 4px gap). Trackbars and color
@@ -456,7 +451,7 @@ mod tips {
     pub const SHOW_LEADER: &str = "Draw a thin colored arrow from each badge to its target element. Useful when badges are stacked or far from their target.";
     pub const CONSECUTIVE_KEYS: &str = "Which key pairs two- and three-key labels may contain. Pressing the same key twice, or two keys with the same finger, means lifting and re-striking one finger, which is slower than alternating.\n\n• No repeats or same finger: never `ll` or `fg`. Fingers follow the Keyboard section.\n• No repeated keys: never `ll`.\n• Allow any keys: the original labels (a few more short labels on busy screens).";
     pub const KEYBOARD_LAYOUT: &str = "Which keyboard layout hint keys are chosen for.\n\n• Auto — follow the active Windows layout (works with any installed layout).\n• A named layout — use this when your keyboard remaps keys in its firmware while Windows stays on QWERTY.";
-    pub const KEYBOARD_GEOMETRY: &str = "The physical shape of your keyboard. Used to work out which finger types each key.\n\n• Standard — ordinary laptop/desktop keyboard.\n• Angle mod — left bottom row shifted one finger toward the pinky.\n• Ortholinear / split ergo — keys in straight columns.";
+    pub const KEYBOARD_GEOMETRY: &str = "The physical shape of your keyboard. Used to work out which finger types each key.\n\n• Standard — ordinary laptop/desktop keyboard. The diagonal b and 6 keys count as either index finger.\n• Angle mod — left bottom row shifted one finger toward the pinky.\n• Ortholinear / split ergo — keys in straight columns; b is left index, 6 right index.";
     pub const SCOPE: &str = "Which set of windows the element picker enumerates.\n\n• Active window only — fastest; legacy behaviour.\n• Active monitor — every visible window on the cursor's monitor.\n• All visible windows — every monitor; broadest reach, slowest.";
     pub const MAX_ELEMENTS: &str = "Hard cap on collected elements per pick (multi-window scopes only).\n\nLower = snappier overlay; higher = more reachable targets. Active-window mode uses platform-specific caps and ignores this.";
     pub const ENABLE_CACHING: &str = "Memoize element trees per window so repeat picks (Esc, retry) skip the slow accessibility walk.\n\nDisable only when debugging stale-results bugs; the TTL already keeps drift bounded.";
@@ -590,7 +585,6 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
     add_tip(tooltip, hwnd, hint_order, tips::ORDER);
     y += ROW_H;
 
-    keyboard_layout::capture_active_layout();
     let detected_layout = keyboard_layout::detect();
     let initial_layout = Layout::resolve(initial.keyboard.layout, detected_layout.clone());
     let preset_labels: Vec<String> = ALL_PRESETS
@@ -709,6 +703,54 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         LEFT_FIELD_W,
     );
     add_tip(tooltip, hwnd, consecutive_keys, tips::CONSECUTIVE_KEYS);
+    y += ROW_H + SECTION_GAP;
+
+    create_section(
+        hwnd,
+        hinstance,
+        "Keyboard",
+        LEFT_LABEL_X,
+        y,
+        LEFT_LABEL_X + LABEL_W + LEFT_FIELD_W,
+    );
+    y += SECTION_H;
+
+    create_label(hwnd, hinstance, "Layout:", LEFT_LABEL_X, y);
+    let layout_labels: Vec<String> = ALL_LAYOUT_CHOICES
+        .iter()
+        .map(|c| layout_option_label(*c, detected_layout.as_ref()))
+        .collect();
+    let keyboard_layout = create_combo(
+        hwnd,
+        hinstance,
+        layout_labels.iter().map(String::as_str),
+        ALL_LAYOUT_CHOICES
+            .iter()
+            .position(|c| *c == initial.keyboard.layout)
+            .unwrap_or(0),
+        ID_KEYBOARD_LAYOUT,
+        LEFT_FIELD_X,
+        y,
+        LEFT_FIELD_W,
+    );
+    add_tip(tooltip, hwnd, keyboard_layout, tips::KEYBOARD_LAYOUT);
+    y += ROW_H;
+
+    create_label(hwnd, hinstance, "Keyboard type:", LEFT_LABEL_X, y);
+    let keyboard_geometry = create_combo(
+        hwnd,
+        hinstance,
+        GEOMETRY_OPTIONS.iter().map(|(_, label)| *label),
+        GEOMETRY_OPTIONS
+            .iter()
+            .position(|(g, _)| *g == initial.keyboard.geometry)
+            .unwrap_or(0),
+        ID_KEYBOARD_GEOMETRY,
+        LEFT_FIELD_X,
+        y,
+        LEFT_FIELD_W,
+    );
+    add_tip(tooltip, hwnd, keyboard_geometry, tips::KEYBOARD_GEOMETRY);
 
     // ──────────────── RIGHT COLUMN ────────────────
     let mut y = PADDING;
@@ -950,47 +992,6 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         initial.performance.cache_ttl_ms as i32,
     );
     add_tip(tooltip, hwnd, cache_ttl_ms, tips::CACHE_TTL);
-    y += ROW_H + SECTION_GAP;
-
-    create_section(hwnd, hinstance, "Keyboard", RIGHT_LABEL_X, y, right_col_end);
-    y += SECTION_H;
-
-    create_label(hwnd, hinstance, "Layout:", RIGHT_LABEL_X, y);
-    let layout_labels: Vec<String> = ALL_LAYOUT_CHOICES
-        .iter()
-        .map(|c| layout_option_label(*c, detected_layout.as_ref()))
-        .collect();
-    let keyboard_layout = create_combo(
-        hwnd,
-        hinstance,
-        layout_labels.iter().map(String::as_str),
-        ALL_LAYOUT_CHOICES
-            .iter()
-            .position(|c| *c == initial.keyboard.layout)
-            .unwrap_or(0),
-        ID_KEYBOARD_LAYOUT,
-        RIGHT_FIELD_X,
-        y,
-        RIGHT_FIELD_W,
-    );
-    add_tip(tooltip, hwnd, keyboard_layout, tips::KEYBOARD_LAYOUT);
-    y += ROW_H;
-
-    create_label(hwnd, hinstance, "Keyboard type:", RIGHT_LABEL_X, y);
-    let keyboard_geometry = create_combo(
-        hwnd,
-        hinstance,
-        GEOMETRY_OPTIONS.iter().map(|(_, label)| *label),
-        GEOMETRY_OPTIONS
-            .iter()
-            .position(|(g, _)| *g == initial.keyboard.geometry)
-            .unwrap_or(0),
-        ID_KEYBOARD_GEOMETRY,
-        RIGHT_FIELD_X,
-        y,
-        RIGHT_FIELD_W,
-    );
-    add_tip(tooltip, hwnd, keyboard_geometry, tips::KEYBOARD_GEOMETRY);
     y += ROW_H + SECTION_GAP;
 
     let startup_now = startup::is_enabled().unwrap_or(initial.startup.launch_at_startup);

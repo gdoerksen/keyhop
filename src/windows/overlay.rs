@@ -664,6 +664,10 @@ impl OverlayState {
             Some(c) if in_labels(c) => Some(c),
             _ => qwerty_char.filter(|c| in_labels(*c)).or(os_char),
         };
+        // Keys outside the alphabet are ignored like before, except letters,
+        // which keep the old "wrong letter resets the prefix" behaviour. So
+        // a stray `,` mid-label doesn't throw away what was typed.
+        let ch = ch.filter(|c| in_labels(*c) || c.is_alphabetic());
         if let Some(ch) = ch {
             self.typed.push(ch);
 
