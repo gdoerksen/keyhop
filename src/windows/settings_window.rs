@@ -15,14 +15,14 @@
 //! │                                  │                                  │
 //! │ Hints                            │ Opacity                          │
 //! │   Strategy ▼                     │   Element ━━●━━━━ 60             │
-//! │   Preset ▼                       │   Window  ━━━━━━━ 0              │
-//! │   Custom alphabet [_____]        │   Element badge size [▲ 26 ▼]    │
-//! │   Custom additions [_____]       │   Window badge size  [▲ 60 ▼]    │
-//! │   [ ] Include numbers (0-9)      │   [x] Draw arrow leader          │
-//! │   [ ] Include extended (; ')     │                                  │
-//! │   [x] Exclude ambiguous (O 0)    │ Scope                            │
-//! │   Min single-key  [▲ 8 ▼]        │   Target windows ▼               │
-//! │                                  │   Max elements   [▲ 300 ▼]       │
+//! │   Label order ▼                  │   Window  ━━━━━━━ 0              │
+//! │   Preset ▼                       │   Element badge size [▲ 26 ▼]    │
+//! │   Custom alphabet [_____]        │   Window badge size  [▲ 60 ▼]    │
+//! │   Custom additions [_____]       │   [x] Draw arrow leader          │
+//! │   [ ] Include numbers (0-9)      │                                  │
+//! │   [ ] Include extended (; ')     │ Scope                            │
+//! │   [x] Exclude ambiguous (O 0)    │   Target windows ▼               │
+//! │   Min single-key  [▲ 8 ▼]        │   Max elements   [▲ 300 ▼]       │
 //! │                                  │                                  │
 //! │                                  │ Performance                      │
 //! │                                  │   [x] Cache enumeration          │
@@ -97,6 +97,7 @@ use crate::config::{
     PerformanceConfig, ScopeConfig, ScopeMode, StartupConfig,
 };
 use crate::hint::{HintStrategy, DEFAULT_ALPHABET};
+use crate::layout_order::HintOrder;
 use crate::windows::{hotkey, notification, overlay, startup};
 
 // ──────────────────── Layout constants ────────────────────
@@ -159,6 +160,7 @@ const ID_CACHE_TTL_MS: usize = 1020;
 const ID_MIN_SINGLES: usize = 1021;
 const ID_ELEMENT_FONT_SIZE: usize = 1022;
 const ID_WINDOW_FONT_SIZE: usize = 1023;
+const ID_HINT_ORDER: usize = 1024;
 
 // Numeric labels mirroring trackbar / spinner positions live in
 // the 1100+ range so we can update them on slider drag without an
@@ -196,6 +198,13 @@ const STRATEGY_OPTIONS: &[(HintStrategy, &str)] = &[
     (HintStrategy::FixedLength, "Fixed length"),
 ];
 
+/// Hint-order dropdown entries, stable index → enum mapping.
+const ORDER_OPTIONS: &[(HintOrder, &str)] = &[
+    (HintOrder::Center, "Center of window outward (recommended)"),
+    (HintOrder::Cursor, "Mouse cursor outward"),
+    (HintOrder::Reading, "Reading order (top-left first)"),
+];
+
 /// Scope-mode dropdown entries, stable index → enum mapping.
 const SCOPE_OPTIONS: &[(ScopeMode, &str)] = &[
     (ScopeMode::ActiveWindow, "Active window only"),
@@ -211,6 +220,7 @@ struct State {
     open_settings: HWND,
     alphabet: HWND,
     hint_strategy: HWND,
+    hint_order: HWND,
     alphabet_preset: HWND,
     include_numbers: HWND,
     include_extended: HWND,
@@ -387,6 +397,7 @@ mod tips {
     pub const OPEN_SETTINGS: &str =
         "Global hotkey to open this settings window.\n\nSame chord syntax as Pick element.";
     pub const STRATEGY: &str = "How hint labels are allocated.\n\n• Shortest first — minimizes average keystrokes (Vimium-style).\n• Fixed length — every label has the same length; predictable but longer.";
+    pub const ORDER: &str = "Where the shortest (one-key) hints are placed.\n\n• Center of window — labels radiate out from the middle of the window, where your eyes usually are.\n• Mouse cursor — labels radiate out from the pointer.\n• Reading order — top-left first (the previous behaviour).";
     pub const PRESET: &str = "Built-in alphabet preset.\n\n• Home row (asdfghjkl) — the default; minimal hand travel.\n• Home row + extended — adds ; ' for 11 keys.\n• Alphanumeric — letters + digits, 36 keys.\n• Letters only — full A-Z.\n• Custom — uses the Custom alphabet field below verbatim.";
     pub const ALPHABET: &str = "Resolved hint alphabet (rebuilt automatically from the preset and modifier flags).\n\nEdit directly only when 'Custom' preset is selected — otherwise Save will overwrite this with the preset's value.";
     pub const CUSTOM_ADDITIONS: &str = "Extra characters appended to the preset alphabet.\n\nUseful for non-ANSI keyboards or keys you have a habit of hitting (€, ç, ï…). Combined with the preset before ambiguous-character stripping.";
@@ -516,6 +527,23 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         LEFT_FIELD_W,
     );
     add_tip(tooltip, hwnd, hint_strategy, tips::STRATEGY);
+    y += ROW_H;
+
+    create_label(hwnd, hinstance, "Label order:", LEFT_LABEL_X, y);
+    let hint_order = create_combo(
+        hwnd,
+        hinstance,
+        ORDER_OPTIONS.iter().map(|(_, label)| *label),
+        ORDER_OPTIONS
+            .iter()
+            .position(|(o, _)| *o == initial.hints.order)
+            .unwrap_or(0),
+        ID_HINT_ORDER,
+        LEFT_FIELD_X,
+        y,
+        LEFT_FIELD_W,
+    );
+    add_tip(tooltip, hwnd, hint_order, tips::ORDER);
     y += ROW_H;
 
     create_label(hwnd, hinstance, "Alphabet preset:", LEFT_LABEL_X, y);
@@ -913,6 +941,7 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         open_settings,
         alphabet,
         hint_strategy,
+        hint_order,
         alphabet_preset,
         include_numbers,
         include_extended,
@@ -1604,6 +1633,11 @@ fn collect_config() -> Option<(Config, bool)> {
             .get(strategy_idx)
             .map(|(s, _)| *s)
             .unwrap_or_default();
+        let order_idx = unsafe { combo_selection(st.hint_order) };
+        let order = ORDER_OPTIONS
+            .get(order_idx)
+            .map(|(o, _)| *o)
+            .unwrap_or_default();
         let preset_idx = unsafe { combo_selection(st.alphabet_preset) };
         let preset = ALL_PRESETS
             .get(preset_idx)
@@ -1655,6 +1689,7 @@ fn collect_config() -> Option<(Config, bool)> {
             exclude_ambiguous,
             custom_additions,
             min_singles,
+            order,
         };
         // Materialise the preset choices into a concrete alphabet
         // string before we save. This way `config.toml` always has a

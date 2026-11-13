@@ -91,7 +91,8 @@ impl HintEngine {
     /// `n − m` prefix slots for the rest of the count. Trades a small
     /// average-typing penalty for guaranteed one-key reach on the
     /// first `m` elements (which are usually the most likely targets,
-    /// since enumeration order roughly matches reading order).
+    /// since the element picker sorts elements nearest the configured
+    /// [`crate::HintOrder`] anchor — window center by default — first).
     ///
     /// The `n − 1` cap is enforced at allocation time so we never
     /// starve multi-character hints of prefix slots.
