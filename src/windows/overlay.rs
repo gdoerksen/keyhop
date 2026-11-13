@@ -640,7 +640,7 @@ impl OverlayState {
         }
     }
 
-    fn key_down(&mut self, vk: u32) {
+    fn key_down(&mut self, vk: u32, scancode: u32) {
         if vk == VK_ESCAPE.0 as u32 {
             self.selected = None;
             self.done = true;
@@ -650,9 +650,21 @@ impl OverlayState {
             self.typed.pop();
             return;
         }
-        // VK_A..VK_Z map 1:1 to ASCII 'A'..'Z'.
-        if (b'A' as u32..=b'Z' as u32).contains(&vk) {
-            let ch = (vk as u8 - b'A' + b'a') as char;
+        // Translate through the active keyboard layout so any key in the
+        // alphabet (digits, `;`, Dvorak/Cyrillic letters…) is matchable.
+        // The QWERTY character of the same physical key is accepted too,
+        // for alphabets that fell back to QWERTY on keys the layout can't
+        // render — but only when the OS character isn't used by any label,
+        // so a mistyped key on Dvorak resets instead of silently matching
+        // its QWERTY twin. Non-character keys (Shift, Ctrl, F-keys) are
+        // ignored.
+        let (os_char, qwerty_char) = super::keyboard_layout::key_chars(vk, scancode);
+        let in_labels = |c: char| self.laid.iter().any(|h| h.label.contains(c));
+        let ch = match os_char {
+            Some(c) if in_labels(c) => Some(c),
+            _ => qwerty_char.filter(|c| in_labels(*c)).or(os_char),
+        };
+        if let Some(ch) = ch {
             self.typed.push(ch);
 
             if let Some(idx) = self.laid.iter().position(|h| h.label == self.typed) {
@@ -1319,7 +1331,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         // to BeginPaint/EndPaint on the layered surface.
         WM_PAINT => LRESULT(0),
         WM_KEYDOWN => {
-            state.key_down(wp.0 as u32);
+            state.key_down(wp.0 as u32, ((lp.0 as u32) >> 16) & 0xFF);
             LRESULT(0)
         }
         WM_KILLFOCUS => {

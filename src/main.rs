@@ -215,9 +215,7 @@ fn run_windows(cli: Cli) -> anyhow::Result<()> {
     // who hand-edit `[hints]` to switch presets don't have to delete the
     // stale `alphabet` field by hand. Settings dialog Save also writes
     // a resolved value, so this is just defence-in-depth.
-    let resolved_alphabet = keyhop::alphabet_presets::build_alphabet(&config.hints);
-    let hint_engine = keyhop::HintEngine::with_strategy(&resolved_alphabet, config.hints.strategy)
-        .with_min_singles(config.hints.min_singles);
+    let (hint_engine, engine_layout_id) = build_hint_engine(&config);
     let element_style = HintStyle::elements_from_config(&config.colors.element);
     let window_style = HintStyle::windows_from_config(&config.colors.window);
 
@@ -340,6 +338,9 @@ fn run_windows(cli: Cli) -> anyhow::Result<()> {
 
     let mut runtime = Runtime {
         hint_engine,
+        engine_layout_id,
+        hints_config: config.hints.clone(),
+        keyboard_config: config.keyboard,
         element_style,
         window_style,
         scope_mode: config.scope.mode,
@@ -404,7 +405,7 @@ fn run_windows(cli: Cli) -> anyhow::Result<()> {
                     }
                 },
                 _ => {
-                    if let Err(e) = dispatch_hotkey(action, &mut backend, &runtime) {
+                    if let Err(e) = dispatch_hotkey(action, &mut backend, &mut runtime) {
                         tracing::error!(?action, error = ?e, "hotkey handler failed");
                         notification::error(
                             "keyhop: action failed",
@@ -470,6 +471,12 @@ fn run_windows(cli: Cli) -> anyhow::Result<()> {
 #[cfg(windows)]
 struct Runtime {
     hint_engine: HintEngine,
+    /// Windows layout the engine's alphabet was resolved against (see
+    /// [`refresh_engine_for_layout`]).
+    engine_layout_id: isize,
+    /// Inputs needed to rebuild `hint_engine` when the OS layout changes.
+    hints_config: keyhop::config::HintConfig,
+    keyboard_config: keyhop::config::KeyboardConfig,
     element_style: HintStyle,
     window_style: HintStyle,
     /// Which set of windows the element picker enumerates. Driven by
@@ -514,10 +521,11 @@ fn apply_config(
     tray: Option<&mut Tray>,
     announce: bool,
 ) {
-    let resolved_alphabet = keyhop::alphabet_presets::build_alphabet(&new_config.hints);
-    runtime.hint_engine =
-        keyhop::HintEngine::with_strategy(&resolved_alphabet, new_config.hints.strategy)
-            .with_min_singles(new_config.hints.min_singles);
+    let (engine, layout_id) = build_hint_engine(new_config);
+    runtime.hint_engine = engine;
+    runtime.engine_layout_id = layout_id;
+    runtime.hints_config = new_config.hints.clone();
+    runtime.keyboard_config = new_config.keyboard;
     runtime.element_style = HintStyle::elements_from_config(&new_config.colors.element);
     runtime.window_style = HintStyle::windows_from_config(&new_config.colors.window);
     runtime.scope_mode = new_config.scope.mode;
@@ -599,12 +607,53 @@ fn notify_hotkey_conflicts(conflicts: &[HotkeyConflict]) {
     );
 }
 
+/// Resolve the keyboard layout, build the alphabet through it, and
+/// construct the [`HintEngine`]. Returns the engine plus the id of the
+/// Windows layout it was built against.
+#[cfg(windows)]
+fn build_hint_engine(config: &Config) -> (HintEngine, isize) {
+    let layout_id = keyhop::windows::keyboard_layout::capture_active_layout();
+    let detected = match config.keyboard.layout {
+        keyhop::LayoutChoice::Auto => keyhop::windows::keyboard_layout::detect(),
+        _ => None,
+    };
+    let layout = keyhop::Layout::resolve(config.keyboard.layout, detected);
+    let alphabet = keyhop::alphabet_presets::build_alphabet_for(&config.hints, &layout);
+    tracing::debug!(%alphabet, "hint alphabet resolved");
+    let engine = HintEngine::with_strategy(&alphabet, config.hints.strategy)
+        .with_min_singles(config.hints.min_singles);
+    (engine, layout_id)
+}
+
+/// Capture the current Windows layout (the overlay translates keystrokes
+/// through it) and, in `auto` layout mode, rebuild the engine if the user
+/// switched layouts since it was built, so the labels stay typeable.
+#[cfg(windows)]
+fn refresh_engine_for_layout(runtime: &mut Runtime) {
+    let current = keyhop::windows::keyboard_layout::capture_active_layout();
+    if runtime.keyboard_config.layout != keyhop::LayoutChoice::Auto
+        || current == runtime.engine_layout_id
+    {
+        return;
+    }
+    let cfg = Config {
+        hints: runtime.hints_config.clone(),
+        keyboard: runtime.keyboard_config,
+        ..Config::default()
+    };
+    let (engine, id) = build_hint_engine(&cfg);
+    tracing::info!("keyboard layout changed; rebuilt hint alphabet");
+    runtime.hint_engine = engine;
+    runtime.engine_layout_id = id;
+}
+
 #[cfg(windows)]
 fn dispatch_hotkey(
     action: HotkeyAction,
     backend: &mut keyhop::windows::WindowsBackend,
-    runtime: &Runtime,
+    runtime: &mut Runtime,
 ) -> anyhow::Result<()> {
+    refresh_engine_for_layout(runtime);
     match action {
         HotkeyAction::PickElement => handle_pick_element(backend, runtime),
         HotkeyAction::PickWindow => handle_pick_window(runtime),
@@ -683,7 +732,7 @@ fn handle_pick_window(runtime: &Runtime) -> anyhow::Result<()> {
     }
     tracing::info!(count = windows.len(), "showing window overlay");
 
-    match window_picker::pick_with_style(windows, runtime.window_style)? {
+    match window_picker::pick_with(windows, &runtime.hint_engine, runtime.window_style)? {
         Some(chosen) => {
             tracing::info!(title = %chosen.title, "window selected — focusing");
             window_picker::focus(chosen.hwnd)?;

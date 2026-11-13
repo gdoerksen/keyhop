@@ -24,6 +24,7 @@ pub mod backend;
 pub mod cache;
 pub mod config;
 pub mod hint;
+pub mod keyboard;
 pub mod layout_order;
 pub mod model;
 
@@ -34,5 +35,6 @@ pub use action::Action;
 pub use backend::Backend;
 pub use config::Config;
 pub use hint::{HintEngine, HintStrategy, DEFAULT_ALPHABET};
+pub use keyboard::{Geometry, Layout, LayoutChoice};
 pub use layout_order::HintOrder;
 pub use model::{Bounds, Element, ElementId, Role};

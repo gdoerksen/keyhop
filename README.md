@@ -177,10 +177,15 @@ alphabet           = "asdfghjkl"
 strategy           = "shortest_first"   # shortest_first | fixed_length
 order              = "center"           # center | cursor | reading — where the shortest labels land
 preset             = "home_row"          # home_row | home_row_extended | lowercase_alpha | alphanumeric | numbers | custom
+                                         # (home_row / numbers / extended follow [keyboard] layout by key position)
 include_numbers    = false               # append 0-9
 include_extended   = false               # append ; '
 exclude_ambiguous  = true                # strip O / 0 from the resolved alphabet
 custom_additions   = ""                  # extra chars appended verbatim
+
+[keyboard]
+layout   = "auto"        # auto (follow Windows) | qwerty | dvorak | colemak | colemak_dh | workman
+geometry = "staggered"   # staggered | angle_mod | ortho
 
 [scope]
 mode         = "active_window"           # active_window | active_monitor | all_windows
