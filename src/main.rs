@@ -629,7 +629,7 @@ fn handle_pick_element(
     if let Some(anchor) =
         keyhop::windows::hint_anchor(runtime.hint_order, runtime.scope_mode, &elements)
     {
-        keyhop::ordering::sort_by_proximity(&mut elements, anchor);
+        keyhop::layout_order::sort_by_proximity(&mut elements, anchor);
     }
 
     let labels = runtime.hint_engine.generate(elements.len());

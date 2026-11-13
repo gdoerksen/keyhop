@@ -56,7 +56,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::cache::{CacheManager, WindowKey};
 use crate::config::ScopeMode;
-use crate::ordering::{union_center, HintOrder};
+use crate::layout_order::{union_center, HintOrder};
 use crate::{Action, Backend, Bounds, Element, ElementId, Role};
 
 /// Maximum tree depth we descend into for *desktop* apps. Native Win32 /

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::hint::HintStrategy;
-use crate::ordering::HintOrder;
+use crate::layout_order::HintOrder;
 
 /// Top-level configuration loaded from `config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

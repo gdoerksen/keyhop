@@ -97,7 +97,7 @@ use crate::config::{
     PerformanceConfig, ScopeConfig, ScopeMode, StartupConfig,
 };
 use crate::hint::{HintStrategy, DEFAULT_ALPHABET};
-use crate::ordering::HintOrder;
+use crate::layout_order::HintOrder;
 use crate::windows::{hotkey, notification, overlay, startup};
 
 // ──────────────────── Layout constants ────────────────────
