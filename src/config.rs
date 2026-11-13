@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::hint::HintStrategy;
+use crate::keyboard::{Geometry, LayoutChoice};
 use crate::layout_order::HintOrder;
 
 /// Top-level configuration loaded from `config.toml`.
@@ -33,6 +34,22 @@ pub struct Config {
     pub scope: ScopeConfig,
     /// Performance toggles (caching).
     pub performance: PerformanceConfig,
+    /// Keyboard layout and board shape.
+    pub keyboard: KeyboardConfig,
+}
+
+/// Physical keyboard settings. Alphabet presets resolve through the
+/// layout (so "home row" means the home-row *keys*), and finger-aware
+/// label rules use the geometry.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct KeyboardConfig {
+    /// Which layout to assume. Default `auto` follows the active Windows
+    /// layout; pick a specific one when the keyboard remaps in firmware
+    /// while Windows stays on QWERTY.
+    pub layout: LayoutChoice,
+    /// Board shape (`staggered`, `angle_mod`, `ortho`).
+    pub geometry: Geometry,
 }
 
 /// Hotkey chord strings (parsed by [`crate::windows::hotkey::parse_hotkey`]).
@@ -423,6 +440,18 @@ mod tests {
         let cfg: Config = toml::from_str(text).unwrap();
         assert_eq!(cfg.scope, ScopeConfig::default());
         assert_eq!(cfg.performance, PerformanceConfig::default());
+    }
+
+    #[test]
+    fn keyboard_section_parses_and_defaults() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.keyboard.layout, LayoutChoice::Auto);
+        assert_eq!(cfg.keyboard.geometry, Geometry::Staggered);
+        let cfg: Config =
+            toml::from_str("[keyboard]\nlayout = \"colemak_dh\"\ngeometry = \"angle_mod\"")
+                .unwrap();
+        assert_eq!(cfg.keyboard.layout, LayoutChoice::ColemakDh);
+        assert_eq!(cfg.keyboard.geometry, Geometry::AngleMod);
     }
 
     #[test]

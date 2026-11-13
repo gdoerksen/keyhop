@@ -22,6 +22,7 @@
 //!   while preserving first-occurrence order.
 
 use crate::config::{AlphabetPreset, HintConfig};
+use crate::keyboard::{translate_charset, translate_positional, Layout};
 
 /// Characters we never want to ship in the same alphabet because they
 /// look near-identical in the overlay font and the user can't tell
@@ -52,7 +53,13 @@ pub const NUMBERS: &str = "0123456789";
 /// Lowercase a-z.
 pub const LOWERCASE_ALPHA: &str = "abcdefghijklmnopqrstuvwxyz";
 
-/// Build the final alphabet string from a [`HintConfig`].
+/// Build the final alphabet string from a [`HintConfig`], assuming a
+/// QWERTY layout. See [`build_alphabet_for`].
+pub fn build_alphabet(cfg: &HintConfig) -> String {
+    build_alphabet_for(cfg, &Layout::qwerty())
+}
+
+/// Build the final alphabet string from a [`HintConfig`] for `layout`.
 ///
 /// Resolution order:
 /// 1. Pick the base set from `cfg.preset`. For [`AlphabetPreset::Custom`]
@@ -60,17 +67,22 @@ pub const LOWERCASE_ALPHA: &str = "abcdefghijklmnopqrstuvwxyz";
 ///    users opting into Custom get exactly what they typed.
 /// 2. Apply the `include_numbers` / `include_extended` flags by
 ///    appending the corresponding constant.
-/// 3. Append `cfg.custom_additions` so users can plug in extra keys
-///    (national characters, F-key sigils, etc.) without giving up the
-///    preset.
-/// 4. If `cfg.exclude_ambiguous` is on, strip [`AMBIGUOUS_CHARS`].
-/// 5. Always dedupe while preserving first-occurrence order so the
+/// 3. Translate through the layout. Positional sets (home row, the `; '`
+///    extension, the number row) are QWERTY *key positions*, so they turn
+///    into whatever the layout types there (`aoeuidhtn` on Dvorak).
+///    Character sets (`a-z`) keep every character the layout can type and
+///    replace the rest with the layout's character on the same key (see
+///    [`translate_charset`]).
+/// 4. Append `cfg.custom_additions` verbatim so users can plug in extra
+///    keys (national characters, etc.) without giving up the preset.
+/// 5. If `cfg.exclude_ambiguous` is on, strip [`AMBIGUOUS_CHARS`].
+/// 6. Always dedupe while preserving first-occurrence order so the
 ///    alphabet doesn't quietly waste hint slots on duplicates.
 ///
 /// Returns at minimum the home-row default if every step somehow
 /// produced an empty string — [`crate::HintEngine`] panics on an empty
 /// alphabet and we'd rather fall back than crash.
-pub fn build_alphabet(cfg: &HintConfig) -> String {
+pub fn build_alphabet_for(cfg: &HintConfig, layout: &Layout) -> String {
     if matches!(cfg.preset, AlphabetPreset::Custom) {
         // Custom mode bypasses the modifier flags entirely.
         let result = dedupe_preserve_order(&cfg.alphabet);
@@ -82,13 +94,18 @@ pub fn build_alphabet(cfg: &HintConfig) -> String {
     }
 
     let mut buf = String::new();
-    buf.push_str(base_for_preset(cfg.preset));
+    match cfg.preset {
+        AlphabetPreset::LowercaseAlpha | AlphabetPreset::Alphanumeric => {
+            buf.push_str(&translate_charset(base_for_preset(cfg.preset), layout));
+        }
+        _ => buf.push_str(&translate_positional(base_for_preset(cfg.preset), layout)),
+    }
 
     if cfg.include_numbers && !cfg.preset_already_has_numbers() {
-        buf.push_str(NUMBERS);
+        buf.push_str(&translate_positional(NUMBERS, layout));
     }
-    if cfg.include_extended && !buf.contains(';') {
-        buf.push_str(HOME_ROW_EXT);
+    if cfg.include_extended && !matches!(cfg.preset, AlphabetPreset::HomeRowExtended) {
+        buf.push_str(&translate_positional(HOME_ROW_EXT, layout));
     }
     if !cfg.custom_additions.is_empty() {
         buf.push_str(&cfg.custom_additions);
@@ -108,9 +125,9 @@ pub fn build_alphabet(cfg: &HintConfig) -> String {
     }
 }
 
-/// Base character set for a built-in preset. `Custom` is intentionally
-/// not handled here — call sites short-circuit before reaching this
-/// function.
+/// Base character set for a built-in preset, written as QWERTY
+/// characters. `Custom` is intentionally not handled here — call sites
+/// short-circuit before reaching this function.
 fn base_for_preset(p: AlphabetPreset) -> &'static str {
     match p {
         AlphabetPreset::HomeRow => HOME_ROW,
@@ -160,6 +177,32 @@ pub fn preset_label(p: AlphabetPreset) -> &'static str {
         AlphabetPreset::Alphanumeric => "Alphanumeric a-z 0-9",
         AlphabetPreset::Numbers => "Numbers 0-9",
         AlphabetPreset::Custom => "Custom (use Alphabet field)",
+    }
+}
+
+/// Like [`preset_label`], but shows the characters the positional
+/// presets produce on `layout` (e.g. "Home row (aoeuidhtn)" on Dvorak).
+pub fn preset_label_for(p: AlphabetPreset, layout: &Layout) -> String {
+    match p {
+        AlphabetPreset::HomeRow => {
+            format!("Home row ({})", translate_positional(HOME_ROW, layout))
+        }
+        AlphabetPreset::HomeRowExtended => {
+            let ext: Vec<String> = translate_positional(HOME_ROW_EXT, layout)
+                .chars()
+                .map(String::from)
+                .collect();
+            format!("Home row + {}", ext.join(" "))
+        }
+        AlphabetPreset::Numbers => {
+            let row = translate_positional("1234567890", layout);
+            if row == "1234567890" {
+                "Numbers 0-9".to_string()
+            } else {
+                format!("Number row ({row})")
+            }
+        }
+        _ => preset_label(p).to_string(),
     }
 }
 
@@ -288,6 +331,67 @@ mod tests {
         assert!(alphabet.contains(';'));
         assert!(alphabet.contains('\''));
         assert!(alphabet.starts_with("asdfghjkl"));
+    }
+
+    #[test]
+    fn home_row_follows_layout() {
+        let alphabet = build_alphabet_for(&cfg(), &Layout::dvorak());
+        assert_eq!(alphabet, "aoeuidhtn");
+        let alphabet = build_alphabet_for(&cfg(), &Layout::colemak());
+        assert_eq!(alphabet, "arstdhnei");
+    }
+
+    #[test]
+    fn home_row_extended_follows_layout() {
+        let mut c = cfg();
+        c.preset = AlphabetPreset::HomeRowExtended;
+        assert_eq!(build_alphabet_for(&c, &Layout::dvorak()), "aoeuidhtns-");
+    }
+
+    #[test]
+    fn lowercase_alpha_on_alt_latin_layout_is_unchanged() {
+        let mut c = cfg();
+        c.preset = AlphabetPreset::LowercaseAlpha;
+        assert_eq!(
+            build_alphabet_for(&c, &Layout::dvorak()),
+            build_alphabet_for(&c, &Layout::qwerty())
+        );
+    }
+
+    #[test]
+    fn non_latin_layout_maps_letters_by_position() {
+        use crate::keyboard::{PhysKey, Row};
+        let cyr = Layout::from_pairs(
+            "фывапролд"
+                .chars()
+                .enumerate()
+                .map(|(i, ch)| (PhysKey::new(Row::Home, i as i8), ch)),
+        );
+        assert_eq!(build_alphabet_for(&cfg(), &cyr), "фывапролд");
+    }
+
+    #[test]
+    fn custom_preset_ignores_layout() {
+        let mut c = cfg();
+        c.preset = AlphabetPreset::Custom;
+        c.alphabet = "asdf".to_string();
+        assert_eq!(build_alphabet_for(&c, &Layout::dvorak()), "asdf");
+    }
+
+    #[test]
+    fn preset_labels_show_resolved_keys() {
+        assert_eq!(
+            preset_label_for(AlphabetPreset::HomeRow, &Layout::dvorak()),
+            "Home row (aoeuidhtn)"
+        );
+        assert_eq!(
+            preset_label_for(AlphabetPreset::HomeRow, &Layout::qwerty()),
+            "Home row (asdfghjkl)"
+        );
+        assert_eq!(
+            preset_label_for(AlphabetPreset::Numbers, &Layout::qwerty()),
+            "Numbers 0-9"
+        );
     }
 
     #[test]

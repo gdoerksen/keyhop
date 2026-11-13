@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Keyboard-layout-aware hint keys.** Hint presets now mean physical key *positions*, not QWERTY letters. "Home row" becomes `aoeuidhtn` on Dvorak, `arstdhnei` on Colemak, and `фывапролд` on a Russian layout. A new `[keyboard]` section (`layout`, `geometry`) and a "Keyboard" group in Settings control this. `layout = "auto"` (the default) reads the active Windows layout, so every installed layout works without extra setup. It also re-reads the layout when you switch layouts between picks. The named layouts (`qwerty`, `dvorak`, `colemak`, `colemak_dh`, `workman`) are for keyboards that remap keys in firmware while Windows stays on QWERTY. `geometry` (`staggered` | `angle_mod` | `ortho`) records which finger types each key, for finger-aware label rules. Keys the overlay font can't draw (e.g. Hebrew in Consolas) fall back to the QWERTY character on the same key and stay typeable. The window picker now uses the configured alphabet too, instead of the built-in default.
 - **Center-out hint label order.** The element picker now gives its shortest labels (`a`, `s`, `d`, …) to the controls nearest the **center of the window**. Previously they went to the top-left, following enumeration order. A new `[hints] order` setting (`center` | `cursor` | `reading`) and a "Label order" dropdown in Settings let you spread labels out from the mouse cursor instead, or go back to the old reading order. In active-window scope "center" means the foreground window's frame; in active-monitor scope it means the cursor's monitor; in all-windows scope it means the center of all detected elements. The window picker is unchanged. The reorder is a single O(n log n) sort, so it adds no measurable latency.
 - **Auto-close and relaunch on upgrade ([#12](https://github.com/rsaz/keyhop/issues/12)).** The MSI installer now automatically closes a running keyhop.exe before upgrading and relaunches it when the upgrade completes — the "Files In Use" dialog that previously interrupted reinstalls is eliminated. Uses WiX Util extension's `CloseApplication` (sends WM_CLOSE, the same graceful shutdown as `keyhop --close`) with a 5-second timeout, and a Type-18 custom action to relaunch after `InstallFinalize`.
 - **Modifier-aware hint actions ([#7](https://github.com/rsaz/keyhop/issues/7)).** While the element-picker overlay is open, holding a modifier key on the *completing* hint keystroke changes what happens to the target element:
@@ -20,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Splash screen** — a centered 400×400 borderless window displaying the store logo is now shown during app initialization, providing visual feedback that keyhop is loading.
 - **Store logo as tray icon** — the system tray icon now uses the official store logo instead of the procedurally generated yellow "K" badge, providing a more polished appearance.
 - **Open settings hotkey** — new global hotkey (`Ctrl+Shift+,` by default) to open the Settings dialog directly from anywhere. Previously, settings could only be opened from the tray menu.
+
+### Fixed
+
+- **Digits and punctuation in hint labels are now typeable.** The overlay used to accept only the letter keys A–Z, so the "Numbers" and "Home row + ; '" presets produced hints you couldn't type. Keystrokes are now translated through the active keyboard layout.
 
 ### Changed
 
