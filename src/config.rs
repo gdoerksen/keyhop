@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::hint::HintStrategy;
+use crate::hint::{ConsecutiveKeys, HintStrategy};
 use crate::keyboard::{Geometry, LayoutChoice};
 use crate::layout_order::HintOrder;
 
@@ -130,6 +130,12 @@ pub struct HintConfig {
     /// of the window where the eye usually rests, instead of the top-left
     /// corner. `reading` restores the old enumeration order.
     pub order: HintOrder,
+    /// Which consecutive key pairs multi-key labels may contain. Default
+    /// [`ConsecutiveKeys::NoSameFinger`]: never the same key twice in a
+    /// row, nor two keys typed by the same finger (fingers come from
+    /// `[keyboard]`). `no_repeat` only forbids doubles; `allow` restores
+    /// the original labels.
+    pub consecutive_keys: ConsecutiveKeys,
 }
 
 /// Default for [`HintConfig::min_singles`]. Lifted to a free function so
@@ -153,6 +159,7 @@ impl Default for HintConfig {
             custom_additions: String::new(),
             min_singles: default_min_singles(),
             order: HintOrder::default(),
+            consecutive_keys: ConsecutiveKeys::default(),
         }
     }
 }
@@ -452,6 +459,16 @@ mod tests {
                 .unwrap();
         assert_eq!(cfg.keyboard.layout, LayoutChoice::ColemakDh);
         assert_eq!(cfg.keyboard.geometry, Geometry::AngleMod);
+    }
+
+    #[test]
+    fn consecutive_keys_defaults_and_parses() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.hints.consecutive_keys, ConsecutiveKeys::NoSameFinger);
+        let cfg: Config = toml::from_str("[hints]\nconsecutive_keys = \"allow\"").unwrap();
+        assert_eq!(cfg.hints.consecutive_keys, ConsecutiveKeys::Allow);
+        let cfg: Config = toml::from_str("[hints]\nconsecutive_keys = \"no_repeat\"").unwrap();
+        assert_eq!(cfg.hints.consecutive_keys, ConsecutiveKeys::NoRepeat);
     }
 
     #[test]

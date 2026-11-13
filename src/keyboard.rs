@@ -24,6 +24,8 @@
 //! This module is platform-neutral and pure data, so new layouts are a
 //! table, not code.
 
+use std::sync::OnceLock;
+
 use serde::{Deserialize, Serialize};
 
 /// A row of the main key block.
@@ -82,7 +84,9 @@ pub enum Finger {
 #[serde(rename_all = "snake_case")]
 pub enum Geometry {
     /// Ordinary row-staggered laptop/desktop keyboard with standard
-    /// touch-typing finger assignments.
+    /// touch-typing finger assignments. The diagonal `b` and `6` keys sit
+    /// between the two index fingers and typists split on which hand takes
+    /// them, so [`Geometry::fingers`] reports both index fingers there.
     #[default]
     Staggered,
     /// Row-staggered keyboard typed with the "angle mod": the left hand's
@@ -92,7 +96,7 @@ pub enum Geometry {
     AngleMod,
     /// Ortholinear or column-staggered (split/ergo) board: every column
     /// belongs to exactly one finger, the inner two columns per hand to
-    /// the index fingers.
+    /// the index fingers — `b` is strictly left index, `6` right index.
     Ortho,
 }
 
@@ -108,11 +112,32 @@ impl Geometry {
                 _ => {}
             }
         }
-        // Staggered and ortho share the column → finger mapping: on a
-        // staggered board the standard touch-typing convention is already
-        // column-based. They're separate variants so a future divergence
-        // (e.g. 40% boards without a number row) is a local change.
         column_finger(key.col)
+    }
+
+    /// Every finger that may type `key`. One finger for most keys; on
+    /// row-staggered boards the diagonal `b` (bottom col 4) and `6` (number
+    /// col 5) keys report both index fingers, so finger-aware rules treat
+    /// them as clashing with either hand's index keys.
+    pub fn fingers(self, key: PhysKey) -> &'static [Finger] {
+        let diagonal = matches!((key.row, key.col), (Row::Bottom, 4) | (Row::Number, 5));
+        if diagonal && self != Geometry::Ortho {
+            return &[Finger::LeftIndex, Finger::RightIndex];
+        }
+        single(self.finger(key))
+    }
+}
+
+fn single(f: Finger) -> &'static [Finger] {
+    match f {
+        Finger::LeftPinky => &[Finger::LeftPinky],
+        Finger::LeftRing => &[Finger::LeftRing],
+        Finger::LeftMiddle => &[Finger::LeftMiddle],
+        Finger::LeftIndex => &[Finger::LeftIndex],
+        Finger::RightIndex => &[Finger::RightIndex],
+        Finger::RightMiddle => &[Finger::RightMiddle],
+        Finger::RightRing => &[Finger::RightRing],
+        Finger::RightPinky => &[Finger::RightPinky],
     }
 }
 
@@ -210,6 +235,13 @@ impl Layout {
         Self::from_pairs(pairs)
     }
 
+    /// Shared US QWERTY table (built once). Prefer this over
+    /// [`Self::qwerty`] on hot paths.
+    pub fn qwerty_ref() -> &'static Layout {
+        static QWERTY: OnceLock<Layout> = OnceLock::new();
+        QWERTY.get_or_init(Self::qwerty)
+    }
+
     /// US QWERTY.
     pub fn qwerty() -> Self {
         Self::from_rows(
@@ -300,16 +332,31 @@ impl Layout {
 
 /// Reinterpret `qwerty` as a list of physical positions (the keys that
 /// type those characters on QWERTY) and return what `layout` types on
-/// the same positions. Characters that aren't on the QWERTY table, or
-/// positions the layout has nothing usable for, pass through unchanged.
+/// the same positions. Characters that aren't on the QWERTY table pass
+/// through unchanged; positions the layout has nothing usable for keep
+/// the QWERTY character unless the layout types it elsewhere, in which
+/// case the position is dropped.
 ///
 /// This is how positional presets ("home row") follow the layout: the
 /// home row is `asdfghjkl` on QWERTY and `aoeuidhtn` on Dvorak.
 pub fn translate_positional(qwerty: &str, layout: &Layout) -> String {
-    let base = Layout::qwerty();
+    let base = Layout::qwerty_ref();
     qwerty
         .chars()
-        .map(|c| base.key_of(c).and_then(|k| layout.char_at(k)).unwrap_or(c))
+        .filter_map(|c| match base.key_of(c) {
+            None => Some(c),
+            Some(k) => match layout.char_at(k) {
+                Some(mapped) => Some(mapped),
+                // The layout has nothing usable on this key (dead key,
+                // missing glyph): fall back to the QWERTY character, which
+                // the overlay accepts for this physical key. If the layout
+                // already types that character on a *different* key, the
+                // fallback would be ambiguous (two keys, wrong finger), so
+                // drop the position instead.
+                None if layout.key_of(c).is_none() => Some(c),
+                None => None,
+            },
+        })
         .collect()
 }
 
@@ -319,7 +366,7 @@ pub fn translate_positional(qwerty: &str, layout: &Layout) -> String {
 /// layout they become the Cyrillic letters on the same keys, and on AZERTY
 /// the unshifted number-row characters replace the (shifted) digits.
 pub fn translate_charset(chars: &str, layout: &Layout) -> String {
-    let base = Layout::qwerty();
+    let base = Layout::qwerty_ref();
     chars
         .chars()
         .map(|c| {
@@ -425,6 +472,36 @@ mod tests {
         assert_eq!(translate_positional("as", &sparse), "фs");
         // Not a QWERTY character at all: passes through.
         assert_eq!(translate_positional("é", &Layout::dvorak()), "é");
+    }
+
+    #[test]
+    fn translate_positional_drops_ambiguous_fallback() {
+        // Greek-like: the ';' key is a dead key (absent) but ';' is typed
+        // on the Q key. Falling back to ';' would make two keys type it.
+        let l = Layout::from_pairs([
+            (PhysKey::new(Row::Top, 0), ';'),
+            (PhysKey::new(Row::Home, 0), 'α'),
+        ]);
+        assert_eq!(translate_positional("a;'", &l), "α'");
+    }
+
+    #[test]
+    fn staggered_diagonal_keys_report_both_index_fingers() {
+        let q = Layout::qwerty();
+        let both = [Finger::LeftIndex, Finger::RightIndex];
+        for g in [Geometry::Staggered, Geometry::AngleMod] {
+            assert_eq!(g.fingers(q.key_of('b').unwrap()), &both);
+            assert_eq!(g.fingers(q.key_of('6').unwrap()), &both);
+            assert_eq!(g.fingers(q.key_of('v').unwrap()), &[Finger::LeftIndex]);
+        }
+        assert_eq!(
+            Geometry::Ortho.fingers(q.key_of('b').unwrap()),
+            &[Finger::LeftIndex]
+        );
+        assert_eq!(
+            Geometry::Ortho.fingers(q.key_of('6').unwrap()),
+            &[Finger::RightIndex]
+        );
     }
 
     #[test]

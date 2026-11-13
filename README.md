@@ -182,6 +182,7 @@ include_numbers    = false               # append 0-9
 include_extended   = false               # append ; '
 exclude_ambiguous  = true                # strip O / 0 from the resolved alphabet
 custom_additions   = ""                  # extra chars appended verbatim
+consecutive_keys   = "no_same_finger"    # no_same_finger | no_repeat | allow — avoid ll / fg style labels
 
 [keyboard]
 layout   = "auto"        # auto (follow Windows) | qwerty | dvorak | colemak | colemak_dh | workman

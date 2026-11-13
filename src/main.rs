@@ -215,7 +215,7 @@ fn run_windows(cli: Cli) -> anyhow::Result<()> {
     // who hand-edit `[hints]` to switch presets don't have to delete the
     // stale `alphabet` field by hand. Settings dialog Save also writes
     // a resolved value, so this is just defence-in-depth.
-    let (hint_engine, engine_layout_id) = build_hint_engine(&config);
+    let (hint_engine, engine_layout_id) = build_hint_engine(&config.hints, &config.keyboard);
     let element_style = HintStyle::elements_from_config(&config.colors.element);
     let window_style = HintStyle::windows_from_config(&config.colors.window);
 
@@ -339,8 +339,6 @@ fn run_windows(cli: Cli) -> anyhow::Result<()> {
     let mut runtime = Runtime {
         hint_engine,
         engine_layout_id,
-        hints_config: config.hints.clone(),
-        keyboard_config: config.keyboard,
         element_style,
         window_style,
         scope_mode: config.scope.mode,
@@ -386,7 +384,7 @@ fn run_windows(cli: Cli) -> anyhow::Result<()> {
 
         for action in hotkeys.poll_actions() {
             match action {
-                HotkeyAction::OpenSettings => match settings_window::show(&config) {
+                HotkeyAction::OpenSettings => match open_settings(&config) {
                     Ok(Some(new_config)) => {
                         apply_config(
                             &new_config,
@@ -405,7 +403,7 @@ fn run_windows(cli: Cli) -> anyhow::Result<()> {
                     }
                 },
                 _ => {
-                    if let Err(e) = dispatch_hotkey(action, &mut backend, &mut runtime) {
+                    if let Err(e) = dispatch_hotkey(action, &mut backend, &mut runtime, &config) {
                         tracing::error!(?action, error = ?e, "hotkey handler failed");
                         notification::error(
                             "keyhop: action failed",
@@ -420,7 +418,7 @@ fn run_windows(cli: Cli) -> anyhow::Result<()> {
             tray.as_ref().map(|t| t.poll_commands()).unwrap_or_default();
         for cmd in tray_cmds {
             match cmd {
-                TrayCommand::OpenSettings => match settings_window::show(&config) {
+                TrayCommand::OpenSettings => match open_settings(&config) {
                     Ok(Some(new_config)) => {
                         apply_config(
                             &new_config,
@@ -474,9 +472,6 @@ struct Runtime {
     /// Windows layout the engine's alphabet was resolved against (see
     /// [`refresh_engine_for_layout`]).
     engine_layout_id: isize,
-    /// Inputs needed to rebuild `hint_engine` when the OS layout changes.
-    hints_config: keyhop::config::HintConfig,
-    keyboard_config: keyhop::config::KeyboardConfig,
     element_style: HintStyle,
     window_style: HintStyle,
     /// Which set of windows the element picker enumerates. Driven by
@@ -521,11 +516,9 @@ fn apply_config(
     tray: Option<&mut Tray>,
     announce: bool,
 ) {
-    let (engine, layout_id) = build_hint_engine(new_config);
+    let (engine, layout_id) = build_hint_engine(&new_config.hints, &new_config.keyboard);
     runtime.hint_engine = engine;
     runtime.engine_layout_id = layout_id;
-    runtime.hints_config = new_config.hints.clone();
-    runtime.keyboard_config = new_config.keyboard;
     runtime.element_style = HintStyle::elements_from_config(&new_config.colors.element);
     runtime.window_style = HintStyle::windows_from_config(&new_config.colors.window);
     runtime.scope_mode = new_config.scope.mode;
@@ -607,21 +600,52 @@ fn notify_hotkey_conflicts(conflicts: &[HotkeyConflict]) {
     );
 }
 
+/// Open the Settings dialog, capturing the user's keyboard layout first
+/// while their app is still in front (so the dialog's "Auto" entry and
+/// the alphabet it saves reflect the layout they're actually using).
+#[cfg(windows)]
+fn open_settings(config: &Config) -> anyhow::Result<Option<Config>> {
+    keyhop::windows::keyboard_layout::capture_active_layout();
+    settings_window::show(config)
+}
+
 /// Resolve the keyboard layout, build the alphabet through it, and
 /// construct the [`HintEngine`]. Returns the engine plus the id of the
 /// Windows layout it was built against.
 #[cfg(windows)]
-fn build_hint_engine(config: &Config) -> (HintEngine, isize) {
-    let layout_id = keyhop::windows::keyboard_layout::capture_active_layout();
-    let detected = match config.keyboard.layout {
+///
+/// Uses the most recently captured layout rather than re-reading the
+/// foreground window: this also runs after Settings → Save, when keyhop's
+/// own window is in front and Windows may report a stale layout. The
+/// hotkey path captures fresh first (see [`refresh_engine_for_layout`]).
+fn build_hint_engine(
+    hints: &keyhop::config::HintConfig,
+    keyboard: &keyhop::config::KeyboardConfig,
+) -> (HintEngine, isize) {
+    let layout_id = keyhop::windows::keyboard_layout::last_layout_id();
+    let detected = match keyboard.layout {
         keyhop::LayoutChoice::Auto => keyhop::windows::keyboard_layout::detect(),
         _ => None,
     };
-    let layout = keyhop::Layout::resolve(config.keyboard.layout, detected);
-    let alphabet = keyhop::alphabet_presets::build_alphabet_for(&config.hints, &layout);
+    let layout = keyhop::Layout::resolve(keyboard.layout, detected);
+    let alphabet = keyhop::alphabet_presets::build_alphabet_for(hints, &layout);
     tracing::debug!(%alphabet, "hint alphabet resolved");
-    let engine = HintEngine::with_strategy(&alphabet, config.hints.strategy)
-        .with_min_singles(config.hints.min_singles);
+    // Finger per alphabet character. Characters the layout doesn't have
+    // are typed via their QWERTY key (see `keyboard_layout::key_chars`),
+    // so look them up on QWERTY.
+    let qwerty = keyhop::Layout::qwerty_ref();
+    let fingers = alphabet
+        .chars()
+        .map(|c| {
+            layout
+                .key_of(c)
+                .or_else(|| qwerty.key_of(c))
+                .map_or(&[][..], |k| keyboard.geometry.fingers(k))
+        })
+        .collect();
+    let engine = HintEngine::with_strategy(&alphabet, hints.strategy)
+        .with_min_singles(hints.min_singles)
+        .with_key_rule(hints.consecutive_keys, fingers);
     (engine, layout_id)
 }
 
@@ -629,19 +653,12 @@ fn build_hint_engine(config: &Config) -> (HintEngine, isize) {
 /// through it) and, in `auto` layout mode, rebuild the engine if the user
 /// switched layouts since it was built, so the labels stay typeable.
 #[cfg(windows)]
-fn refresh_engine_for_layout(runtime: &mut Runtime) {
+fn refresh_engine_for_layout(runtime: &mut Runtime, config: &Config) {
     let current = keyhop::windows::keyboard_layout::capture_active_layout();
-    if runtime.keyboard_config.layout != keyhop::LayoutChoice::Auto
-        || current == runtime.engine_layout_id
-    {
+    if config.keyboard.layout != keyhop::LayoutChoice::Auto || current == runtime.engine_layout_id {
         return;
     }
-    let cfg = Config {
-        hints: runtime.hints_config.clone(),
-        keyboard: runtime.keyboard_config,
-        ..Config::default()
-    };
-    let (engine, id) = build_hint_engine(&cfg);
+    let (engine, id) = build_hint_engine(&config.hints, &config.keyboard);
     tracing::info!("keyboard layout changed; rebuilt hint alphabet");
     runtime.hint_engine = engine;
     runtime.engine_layout_id = id;
@@ -652,8 +669,9 @@ fn dispatch_hotkey(
     action: HotkeyAction,
     backend: &mut keyhop::windows::WindowsBackend,
     runtime: &mut Runtime,
+    config: &Config,
 ) -> anyhow::Result<()> {
-    refresh_engine_for_layout(runtime);
+    refresh_engine_for_layout(runtime, config);
     match action {
         HotkeyAction::PickElement => handle_pick_element(backend, runtime),
         HotkeyAction::PickWindow => handle_pick_window(runtime),

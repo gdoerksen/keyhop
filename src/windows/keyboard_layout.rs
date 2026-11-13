@@ -32,13 +32,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
-use std::cell::Cell;
+use std::sync::atomic::{AtomicIsize, Ordering};
 
-thread_local! {
-    /// Layout captured by the last [`capture_active_layout`] call on this
-    /// (the UI) thread. `0` = nothing captured yet.
-    static CAPTURED_HKL: Cell<isize> = const { Cell::new(0) };
-}
+/// Layout captured by the last [`capture_active_layout`] call. `0` =
+/// nothing captured yet. Process-wide so the Settings window and the
+/// overlay agree no matter which thread they run on.
+static CAPTURED_HKL: AtomicIsize = AtomicIsize::new(0);
 
 use crate::keyboard::{Layout, PhysKey, Row};
 
@@ -130,15 +129,25 @@ pub fn capture_active_layout() -> isize {
         }
     }
     .0 as isize;
-    CAPTURED_HKL.with(|c| c.set(id));
+    CAPTURED_HKL.store(id, Ordering::Relaxed);
     id
+}
+
+/// Id of the most recently captured layout, capturing now if nothing was
+/// captured yet. Unlike [`capture_active_layout`] this doesn't re-read the
+/// foreground window, so it's safe to call while one of keyhop's own
+/// windows (Settings) is in front — Windows may report a stale layout
+/// for those.
+pub fn last_layout_id() -> isize {
+    match CAPTURED_HKL.load(Ordering::Relaxed) {
+        0 => capture_active_layout(),
+        id => id,
+    }
 }
 
 /// The captured layout, capturing now if nothing was captured yet.
 fn input_hkl() -> HKL {
-    let id = CAPTURED_HKL.with(|c| c.get());
-    let id = if id == 0 { capture_active_layout() } else { id };
-    HKL(id as *mut core::ffi::c_void)
+    HKL(last_layout_id() as *mut core::ffi::c_void)
 }
 
 /// Read the captured Windows keyboard layout (see
@@ -176,7 +185,7 @@ pub fn key_chars(vk: u32, scancode: u32) -> (Option<char>, Option<char>) {
         let r = ToUnicodeEx(vk, scancode, &state, &mut buf, TU_NO_STATE_CHANGE, hkl);
         single_char(r, &buf)
     };
-    let qwerty = phys_for_scancode(scancode).and_then(|k| Layout::qwerty().char_at(k));
+    let qwerty = phys_for_scancode(scancode).and_then(|k| Layout::qwerty_ref().char_at(k));
     (os, qwerty)
 }
 
