@@ -56,6 +56,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::cache::{CacheManager, WindowKey};
 use crate::config::ScopeMode;
+use crate::ordering::{union_center, HintOrder};
 use crate::{Action, Backend, Bounds, Element, ElementId, Role};
 
 /// Maximum tree depth we descend into for *desktop* apps. Native Win32 /
@@ -770,6 +771,44 @@ fn cached_bool(el: &UIElement, prop: UIProperty) -> uiautomation::Result<bool> {
 /// equality + hashing inside the map.
 fn hwnd_to_key(hwnd: HWND) -> WindowKey {
     hwnd.0 as usize as u64
+}
+
+/// Resolve the point the element picker's shortest labels should
+/// radiate out from. Returns `None` for [`HintOrder::Reading`] (keep
+/// enumeration order). Any Win32 failure falls back to the center of
+/// the elements' combined bounding box.
+pub fn hint_anchor(order: HintOrder, scope: ScopeMode, elements: &[Element]) -> Option<(i32, i32)> {
+    let resolved = match order {
+        HintOrder::Reading => return None,
+        HintOrder::Cursor => unsafe {
+            let mut pt = POINT { x: 0, y: 0 };
+            GetCursorPos(&mut pt).ok().map(|_| (pt.x, pt.y))
+        },
+        HintOrder::Center => match scope {
+            ScopeMode::ActiveWindow => unsafe {
+                let hwnd = GetForegroundWindow();
+                if hwnd.0.is_null() {
+                    None
+                } else {
+                    window_picker::visible_frame(hwnd)
+                        .filter(|b| b.is_visible())
+                        .map(|b| b.center())
+                }
+            },
+            ScopeMode::ActiveMonitor => {
+                let r = current_monitor_rect();
+                // `current_monitor_rect` reports a huge sentinel rect on
+                // failure; its center (≈ origin) is meaningless here.
+                if r.left == i32::MIN / 2 {
+                    None
+                } else {
+                    Some(((r.left + r.right) / 2, (r.top + r.bottom) / 2))
+                }
+            }
+            ScopeMode::AllWindows => None,
+        },
+    };
+    resolved.or_else(|| union_center(elements))
 }
 
 /// Monitor rect (in physical pixels) under the current cursor. Falls

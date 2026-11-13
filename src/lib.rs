@@ -25,6 +25,7 @@ pub mod cache;
 pub mod config;
 pub mod hint;
 pub mod model;
+pub mod ordering;
 
 #[cfg(windows)]
 pub mod windows;
@@ -34,3 +35,4 @@ pub use backend::Backend;
 pub use config::Config;
 pub use hint::{HintEngine, HintStrategy, DEFAULT_ALPHABET};
 pub use model::{Bounds, Element, ElementId, Role};
+pub use ordering::HintOrder;

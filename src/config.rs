@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::hint::HintStrategy;
+use crate::ordering::HintOrder;
 
 /// Top-level configuration loaded from `config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,6 +108,11 @@ pub struct HintConfig {
     /// minimises average keystrokes at the cost of one-key reach.
     #[serde(default = "default_min_singles")]
     pub min_singles: usize,
+    /// Which point the shortest labels radiate out from. Default:
+    /// [`HintOrder::Center`] — the one-keystroke hints land in the middle
+    /// of the window where the eye usually rests, instead of the top-left
+    /// corner. `reading` restores the old enumeration order.
+    pub order: HintOrder,
 }
 
 /// Default for [`HintConfig::min_singles`]. Lifted to a free function so
@@ -129,6 +135,7 @@ impl Default for HintConfig {
             exclude_ambiguous: true,
             custom_additions: String::new(),
             min_singles: default_min_singles(),
+            order: HintOrder::default(),
         }
     }
 }
@@ -369,6 +376,7 @@ mod tests {
         assert_eq!(cfg.hotkeys.pick_window, "Ctrl+Alt+Space");
         assert_eq!(cfg.hints.alphabet, crate::hint::DEFAULT_ALPHABET);
         assert_eq!(cfg.hints.strategy, HintStrategy::ShortestFirst);
+        assert_eq!(cfg.hints.order, HintOrder::Center);
         assert_eq!(cfg.scope.mode, ScopeMode::ActiveWindow);
         assert_eq!(cfg.scope.max_elements, 300);
         assert!(cfg.performance.enable_caching);
@@ -415,5 +423,13 @@ mod tests {
         let cfg: Config = toml::from_str(text).unwrap();
         assert_eq!(cfg.scope, ScopeConfig::default());
         assert_eq!(cfg.performance, PerformanceConfig::default());
+    }
+
+    #[test]
+    fn hint_order_parses_from_toml() {
+        let cfg: Config = toml::from_str("[hints]\norder = \"cursor\"").unwrap();
+        assert_eq!(cfg.hints.order, HintOrder::Cursor);
+        let cfg: Config = toml::from_str("[hints]\norder = \"reading\"").unwrap();
+        assert_eq!(cfg.hints.order, HintOrder::Reading);
     }
 }

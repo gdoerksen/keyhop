@@ -25,7 +25,7 @@ use std::process::ExitCode;
 
 #[cfg(windows)]
 use keyhop::config::ScopeMode;
-use keyhop::{Action, Backend, Config, Element, HintEngine};
+use keyhop::{Action, Backend, Config, Element, HintEngine, HintOrder};
 
 #[cfg(windows)]
 use keyhop::windows::{
@@ -343,6 +343,7 @@ fn run_windows(cli: Cli) -> anyhow::Result<()> {
         element_style,
         window_style,
         scope_mode: config.scope.mode,
+        hint_order: config.hints.order,
     };
 
     // Win32 message loop. `GetMessageW` is required on this thread for the
@@ -475,6 +476,9 @@ struct Runtime {
     /// `[scope]` in `config.toml`; defaults to active-window for
     /// backwards-compatible v0.3.0 behaviour.
     scope_mode: ScopeMode,
+    /// Which point the shortest element labels radiate out from.
+    /// Driven by `hints.order` in `config.toml`.
+    hint_order: HintOrder,
 }
 
 /// Hot-apply a freshly loaded [`Config`] to every live subsystem
@@ -517,6 +521,7 @@ fn apply_config(
     runtime.element_style = HintStyle::elements_from_config(&new_config.colors.element);
     runtime.window_style = HintStyle::windows_from_config(&new_config.colors.window);
     runtime.scope_mode = new_config.scope.mode;
+    runtime.hint_order = new_config.hints.order;
 
     backend.reconfigure_cache(
         new_config.performance.enable_caching,
@@ -612,10 +617,19 @@ fn handle_pick_element(
     backend: &mut keyhop::windows::WindowsBackend,
     runtime: &Runtime,
 ) -> anyhow::Result<()> {
-    let elements: Vec<Element> = backend.enumerate_by_scope(runtime.scope_mode)?;
+    let mut elements: Vec<Element> = backend.enumerate_by_scope(runtime.scope_mode)?;
     if elements.is_empty() {
         tracing::info!("no interactable elements in foreground window");
         return Ok(());
+    }
+
+    // Reorder so the shortest labels land nearest the configured anchor
+    // (window center / cursor). Sorting `elements` itself keeps
+    // `elements[result.index]` below pointing at the right element.
+    if let Some(anchor) =
+        keyhop::windows::hint_anchor(runtime.hint_order, runtime.scope_mode, &elements)
+    {
+        keyhop::ordering::sort_by_proximity(&mut elements, anchor);
     }
 
     let labels = runtime.hint_engine.generate(elements.len());

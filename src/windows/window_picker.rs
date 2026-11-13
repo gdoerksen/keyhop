@@ -220,7 +220,7 @@ unsafe fn window_class_name(hwnd: HWND) -> String {
 /// includes the invisible drop-shadow margin Win10+ adds around top-level
 /// windows (~7px on each side), which would offset our hint badge into
 /// empty space.
-unsafe fn visible_frame(hwnd: HWND) -> Option<Bounds> {
+pub(crate) unsafe fn visible_frame(hwnd: HWND) -> Option<Bounds> {
     let mut rect = RECT::default();
     let dwm = DwmGetWindowAttribute(
         hwnd,
