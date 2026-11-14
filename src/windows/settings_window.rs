@@ -283,11 +283,14 @@ struct State {
     element_font_size: HWND,
     window_font_size: HWND,
     launch_startup: HWND,
-    /// Snapshot of the leader-line preference at dialog open. Used to
+    /// Element picker's leader-line preference at dialog open. Used to
     /// decide whether to write `show_leader = Some(...)` or leave it as
-    /// `None` (preset default) — we only persist an explicit override
+    /// `None` (preset default): we only persist an explicit override
     /// when the user actually toggled the checkbox.
     initial_show_leader: Option<bool>,
+    /// Window picker's leader-line preference at dialog open. It has no
+    /// control in the dialog, so it's written back unchanged.
+    initial_window_show_leader: Option<bool>,
     /// Element and window `shape` strings at dialog open. The element
     /// value is kept verbatim (often `""` = preset default) unless the
     /// user changes the combo; the window value has no UI and is always
@@ -463,7 +466,9 @@ mod tips {
     pub const WINDOW_OPACITY: &str =
         "Window badge transparency.\n\n0 = use the preset default (90%).\n100 = fully opaque.";
     pub const BADGE_SHAPE: &str = "Callout: a rounded label just below each element with a small tail pointing at it (flips above or beside it when crowded).\n\nCorner rectangle: the classic badge in the element's top-left corner.";
-    pub const SHOW_LEADER: &str = "Draw a thin colored arrow from each badge to its target element. Useful when badges are stacked or far from their target.";
+    pub const SHOW_LEADER: &str = "Element picker: outline each target and draw a thin arrow from badges that were pushed off their element. Callouts never outline; they only get the arrow when there was no room for a tail.
+
+The window picker's setting lives in config.toml ([colors.window] show_leader).";
     pub const CONSECUTIVE_KEYS: &str = "Which key pairs two- and three-key labels may contain. Pressing the same key twice, or two keys with the same finger, means lifting and re-striking one finger, which is slower than alternating.\n\n• No repeats or same finger: never `ll` or `fg`. Fingers follow the Keyboard section.\n• No repeated keys: never `ll`.\n• Allow any keys: the original labels (a few more short labels on busy screens).";
     pub const KEYBOARD_LAYOUT: &str = "Which keyboard layout hint keys are chosen for.\n\n• Auto — follow the active Windows layout (works with any installed layout).\n• A named layout — use this when your keyboard remaps keys in its firmware while Windows stays on QWERTY.";
     pub const KEYBOARD_GEOMETRY: &str = "The physical shape of your keyboard. Used to work out which finger types each key.\n\n• Standard — ordinary laptop/desktop keyboard. The diagonal b and 6 keys count as either index finger.\n• Angle mod — left bottom row shifted one finger toward the pinky.\n• Ortholinear / split ergo — keys in straight columns; b is left index, 6 right index.";
@@ -933,12 +938,11 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
     add_tip(tooltip, hwnd, badge_shape, tips::BADGE_SHAPE);
     y += ROW_H;
 
-    let initial_show_leader = initial
-        .colors
-        .element
-        .show_leader
-        .or(initial.colors.window.show_leader);
-    let show_leader_checked = initial_show_leader.unwrap_or(true);
+    // Element picker only: the window picker keeps whatever the file
+    // says (preset default: off).
+    let initial_show_leader = initial.colors.element.show_leader;
+    let show_leader_checked =
+        initial_show_leader.unwrap_or(overlay::HintStyle::elements().show_leader);
     let right_column_w = LABEL_W + RIGHT_FIELD_W + 4;
     let show_leader = create_checkbox(
         hwnd,
@@ -1108,6 +1112,7 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         window_font_size,
         launch_startup,
         initial_show_leader,
+        initial_window_show_leader: initial.colors.window.show_leader,
         initial_element_shape: initial.colors.element.shape.clone(),
         initial_window_shape: initial.colors.window.shape.clone(),
         saved_config: None,
@@ -1856,12 +1861,13 @@ fn collect_config() -> Option<(Config, bool)> {
         let min_singles = unsafe { spinner_value(st.min_singles) }.max(0) as usize;
         let enable_caching = unsafe { is_checked(st.enable_caching) };
         let show_leader_checked = unsafe { is_checked(st.show_leader) };
-        // Keep the preset default (None) unless the user actually
-        // changed the checkbox from how we showed it. This way upgrade
-        // paths don't suddenly hard-pin everyone to a value, and the
-        // window picker stays leader-less unless the user explicitly
-        // opts in.
-        let show_leader = if Some(show_leader_checked) == st.initial_show_leader {
+        // Keep the file's value (often None = preset default) unless the
+        // user actually changed the checkbox from how we showed it, so
+        // saving other settings never hard-pins the leader preference.
+        let shown_show_leader = st
+            .initial_show_leader
+            .unwrap_or(overlay::HintStyle::elements().show_leader);
+        let show_leader = if show_leader_checked == shown_show_leader {
             st.initial_show_leader
         } else {
             Some(show_leader_checked)
@@ -1943,7 +1949,7 @@ fn collect_config() -> Option<(Config, bool)> {
                     badge_fg: String::new(),
                     border: String::new(),
                     opacity: window_opacity,
-                    show_leader,
+                    show_leader: st.initial_window_show_leader,
                     leader_color: String::new(),
                     font_size: window_font_size,
                     shape: st.initial_window_shape.clone(),

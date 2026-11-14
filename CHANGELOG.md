@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Saving Settings no longer turns on window outlines.** The "Draw arrow from badge to target" checkbox now applies to the element picker only; the window picker's `show_leader` is written back unchanged. Saving with the checkbox untouched also no longer pins `show_leader = true` into a config that didn't set it.
 - **Target outlines and custom border / leader colors were drawn with red and blue swapped.** The yellow element outline showed up cyan-blue, and any custom `border` or `leader_color` came out with its red and blue channels exchanged. Grey defaults looked unaffected.
 - **Digits and punctuation in hint labels are now typeable.** The overlay used to accept only the letter keys A–Z, so the "Numbers" and "Home row + ; '" presets produced hints you couldn't type. Keystrokes are now translated through the active keyboard layout.
 
