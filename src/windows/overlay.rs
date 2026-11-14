@@ -929,7 +929,11 @@ impl OverlayState {
         // badge↔target association is immediate (yellow badge = yellow
         // box around its element). Drawn directly into the DIB so it's
         // already alpha=255 — GDI's FrameRect would have left alpha=0.
-        frame_rect_argb(bits, dib_w, dib_h, target, self.style.badge_bg);
+        // Callout mode never outlines targets: callouts point with their
+        // tail, and a tail-less fallback gets just the connector below.
+        if self.style.shape != BadgeShape::Callout {
+            frame_rect_argb(bits, dib_w, dib_h, target, self.style.badge_bg);
+        }
 
         // Connector arrow only when the badge is meaningfully detached
         // from its target. When the badge sits inside the target the
@@ -2116,10 +2120,11 @@ unsafe fn put_pixel_argb(bits: *mut u8, dib_w: i32, dib_h: i32, x: i32, y: i32, 
     }
     let stride = (dib_w as usize) * 4;
     let p = bits.add((y as usize) * stride + (x as usize) * 4);
-    let bgr = color.0;
-    *p = (bgr & 0xFF) as u8; // B
-    *p.add(1) = ((bgr >> 8) & 0xFF) as u8; // G
-    *p.add(2) = ((bgr >> 16) & 0xFF) as u8; // R
+    // COLORREF is 0x00BBGGRR (red in the low byte); the DIB is B, G, R, A.
+    let c = color.0;
+    *p = ((c >> 16) & 0xFF) as u8; // B
+    *p.add(1) = ((c >> 8) & 0xFF) as u8; // G
+    *p.add(2) = (c & 0xFF) as u8; // R
     *p.add(3) = 0xFF; // A
 }
 
@@ -2135,10 +2140,11 @@ unsafe fn fill_rect_argb(bits: *mut u8, dib_w: i32, dib_h: i32, rect: &RECT, col
         return;
     }
     let stride = (dib_w as usize) * 4;
-    let bgr = color.0;
-    let b = (bgr & 0xFF) as u8;
-    let g = ((bgr >> 8) & 0xFF) as u8;
-    let r = ((bgr >> 16) & 0xFF) as u8;
+    // COLORREF is 0x00BBGGRR (red in the low byte); the DIB is B, G, R, A.
+    let c = color.0;
+    let b = ((c >> 16) & 0xFF) as u8;
+    let g = ((c >> 8) & 0xFF) as u8;
+    let r = (c & 0xFF) as u8;
     for y in y0..y1 {
         let row = bits.add((y as usize) * stride);
         let mut p = row.add((x0 as usize) * 4);
@@ -3386,6 +3392,64 @@ mod callout_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn pixel_helpers_write_colorref_in_dib_channel_order() {
+        // #FFE500 yellow: COLORREF 0x0000E5FF must land as B=0, G=E5, R=FF.
+        let yellow = parse_hex_color("#FFE500").unwrap();
+        let mut buf = vec![0u8; 4 * 4 * 4];
+        unsafe {
+            put_pixel_argb(buf.as_mut_ptr(), 4, 4, 0, 0, yellow);
+            let r = RECT {
+                left: 1,
+                top: 1,
+                right: 2,
+                bottom: 2,
+            };
+            fill_rect_argb(buf.as_mut_ptr(), 4, 4, &r, yellow);
+        }
+        assert_eq!(&buf[0..4], &[0x00, 0xE5, 0xFF, 0xFF]);
+        let i = (4 + 1) * 4;
+        assert_eq!(&buf[i..i + 4], &[0x00, 0xE5, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn callout_mode_never_outlines_targets() {
+        // A hint whose callout had no room for a tail must still not get
+        // a target outline in callout mode; only rect mode outlines.
+        let hint = LaidHint {
+            label: "a".into(),
+            extra: None,
+            badge_rect: RECT {
+                left: 2,
+                top: 2,
+                right: 10,
+                bottom: 8,
+            },
+            extra_rect: None,
+            target_rect: RECT {
+                left: 1,
+                top: 1,
+                right: 30,
+                bottom: 30,
+            },
+            tail: None,
+        };
+        let outline_at_corner = |shape: BadgeShape| {
+            let style = HintStyle {
+                shape,
+                ..HintStyle::elements()
+            };
+            let state = unsafe { OverlayState::new(Vec::new(), style, 0, 0) };
+            let mut buf = vec![0u8; 32 * 32 * 4];
+            unsafe { state.draw_leader_dib(buf.as_mut_ptr(), 32, 32, &hint) };
+            // Bottom-right corner of the target frame, away from any arrow.
+            let i = (29 * 32 + 29) * 4;
+            buf[i + 3]
+        };
+        assert_eq!(outline_at_corner(BadgeShape::Callout), 0);
+        assert_eq!(outline_at_corner(BadgeShape::Rect), 255);
     }
 
     #[test]
