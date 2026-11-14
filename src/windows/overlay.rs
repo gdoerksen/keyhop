@@ -479,6 +479,10 @@ struct CalloutGeom {
     /// Horizontal padding between body edge and label text. Never less
     /// than `radius`, so text stays clear of the rounded corners.
     pad_x: i32,
+    /// How far the tail tip reaches *into* the element past its edge,
+    /// so the callout visibly overlaps what it labels. Capped per
+    /// element at a third of its size (see [`callout_candidates`]).
+    cut_in: i32,
 }
 
 impl CalloutGeom {
@@ -512,6 +516,7 @@ impl HintStyle {
             radius,
             body_h,
             pad_x: self.padding_x.max(radius),
+            cut_in: (tail_h + 1) / 2,
         }
     }
 }
@@ -522,8 +527,10 @@ impl HintStyle {
 /// `(body, tail, bbox)` where `bbox` is the body plus its tail, the
 /// area that must be free of other badges.
 ///
-/// Up/down tails aim at the target's horizontal centre on its near
-/// edge; sideways tails aim at its vertical centre. Sliding moves the
+/// Up/down tails aim at the target's horizontal centre, sideways tails
+/// at its vertical centre. The tip lands `cut_in` pixels inside the
+/// element's near edge (at most a third of the element's height or
+/// width, so tiny controls aren't covered). Sliding moves the
 /// body so the tip sits at the body's inner left or right edge, which
 /// lets a callout dodge a neighbour while still pointing at its element.
 fn callout_candidates(
@@ -534,18 +541,22 @@ fn callout_candidates(
     let cx = (target.left + target.right) / 2;
     let cy = (target.top + target.bottom) / 2;
     let inner = g.inner();
+    let cut_v = g.cut_in.min((target.bottom - target.top) / 3).max(0);
+    let cut_h = g.cut_in.min((target.right - target.left) / 3).max(0);
     let mut out = SmallVec::new();
 
     let vertical = |dir: TailDir, offset: i32| {
         let left = cx - offset;
         let (top, bbox_top, bbox_bottom) = match dir {
             TailDir::Up => {
-                let top = target.bottom + g.tail_h;
-                (top, target.bottom, top + g.body_h)
+                let tip_y = target.bottom - cut_v;
+                let top = tip_y + g.tail_h;
+                (top, tip_y, top + g.body_h)
             }
             _ => {
-                let top = target.top - g.tail_h - g.body_h;
-                (top, top, target.top)
+                let tip_y = target.top + cut_v;
+                let top = tip_y - g.tail_h - g.body_h;
+                (top, top, tip_y)
             }
         };
         let body = RECT {
@@ -572,7 +583,8 @@ fn callout_candidates(
     let top = cy - g.body_h / 2;
     let offset = cy - top;
     // Right of the element, tail pointing left at it.
-    let left = target.right + g.tail_h;
+    let tip_x = target.right - cut_h;
+    let left = tip_x + g.tail_h;
     let body = RECT {
         left,
         top,
@@ -586,12 +598,13 @@ fn callout_candidates(
             offset,
         },
         RECT {
-            left: target.right,
+            left: tip_x,
             ..body
         },
     ));
     // Left of the element, tail pointing right at it.
-    let right = target.left - g.tail_h;
+    let tip_x = target.left + cut_h;
+    let right = tip_x - g.tail_h;
     let body = RECT {
         left: right - body_w,
         top,
@@ -605,7 +618,7 @@ fn callout_candidates(
             offset,
         },
         RECT {
-            right: target.left,
+            right: tip_x,
             ..body
         },
     ));
@@ -3144,15 +3157,29 @@ mod callout_tests {
     }
 
     #[test]
-    fn single_callout_sits_below_pointing_at_bottom_centre() {
+    fn single_callout_sits_below_cutting_into_bottom_centre() {
         let g = style().callout_geom();
+        assert!(g.cut_in > 0);
         let laid = lay_out(&[hint(400, 300, 60, 30, "a")], &style(), 0, 0);
         let h = &laid[0];
         let t = h.tail.expect("tail");
         assert_eq!(t.dir, TailDir::Up);
         assert_eq!(t.offset, body_w(&h.badge_rect) / 2, "centred");
-        assert_eq!(h.badge_rect.top, 330 + g.tail_h);
-        assert_eq!(tip(h), POINT { x: 430, y: 330 });
+        assert_eq!(h.badge_rect.top, 330 - g.cut_in + g.tail_h);
+        assert_eq!(
+            tip(h),
+            POINT {
+                x: 430,
+                y: 330 - g.cut_in
+            }
+        );
+    }
+
+    #[test]
+    fn cut_in_is_capped_for_tiny_elements() {
+        // A 6px-tall control: the tip may reach at most 2px inside.
+        let laid = lay_out(&[hint(400, 300, 60, 6, "a")], &style(), 0, 0);
+        assert_eq!(tip(&laid[0]), POINT { x: 430, y: 304 });
     }
 
     #[test]
@@ -3162,8 +3189,14 @@ mod callout_tests {
         let laid = lay_out(&[hint(400, sh - 30, 60, 30, "a")], &style(), 0, 0);
         let h = &laid[0];
         assert_eq!(h.tail.map(|t| t.dir), Some(TailDir::Down));
-        assert_eq!(h.badge_rect.bottom, sh - 30 - g.tail_h);
-        assert_eq!(tip(h), POINT { x: 430, y: sh - 30 });
+        assert_eq!(h.badge_rect.bottom, sh - 30 + g.cut_in - g.tail_h);
+        assert_eq!(
+            tip(h),
+            POINT {
+                x: 430,
+                y: sh - 30 + g.cut_in
+            }
+        );
     }
 
     #[test]
@@ -3178,7 +3211,13 @@ mod callout_tests {
         assert_eq!(t.dir, TailDir::Up);
         assert_eq!(t.offset, inner);
         assert_eq!(h.badge_rect.left, 0);
-        assert_eq!(tip(h), POINT { x: inner, y: 330 });
+        assert_eq!(
+            tip(h),
+            POINT {
+                x: inner,
+                y: 330 - g.cut_in
+            }
+        );
     }
 
     #[test]
@@ -3196,12 +3235,25 @@ mod callout_tests {
             .collect();
         let laid = lay_out(&hints, &style(), 0, 0);
         assert_no_overlap(&laid);
+        let cut = g.cut_in.min(16 / 3);
         for (h, src) in laid.iter().zip(&hints) {
             let p = tip(h);
             let cx = src.bounds.x + src.bounds.width / 2;
             match h.tail.unwrap().dir {
-                TailDir::Up => assert_eq!(p, POINT { x: cx, y: 316 }),
-                TailDir::Down => assert_eq!(p, POINT { x: cx, y: 300 }),
+                TailDir::Up => assert_eq!(
+                    p,
+                    POINT {
+                        x: cx,
+                        y: 316 - cut
+                    }
+                ),
+                TailDir::Down => assert_eq!(
+                    p,
+                    POINT {
+                        x: cx,
+                        y: 300 + cut
+                    }
+                ),
                 _ => {}
             }
         }
@@ -3214,23 +3266,37 @@ mod callout_tests {
 
     #[test]
     fn short_list_rows_fall_back_to_side_callouts() {
-        // Rows shorter than a callout: below/above run out after two
-        // rows, so the third row points sideways at its row.
+        // Rows shorter than a callout: below/above run out quickly, so
+        // later rows point sideways at their row.
+        let g = style().callout_geom();
         let hints: Vec<Hint> = (0..3)
             .map(|i| hint(300, 300 + i * 10, 200, 10, &format!("{i}")))
             .collect();
         let laid = lay_out(&hints, &style(), 0, 0);
         assert_no_overlap(&laid);
-        let dirs: Vec<_> = laid.iter().map(|h| h.tail.map(|t| t.dir)).collect();
-        assert_eq!(dirs[0], Some(TailDir::Up));
-        assert_eq!(dirs[1], Some(TailDir::Down));
-        assert!(matches!(
-            dirs[2],
-            Some(TailDir::Left) | Some(TailDir::Right)
-        ));
-        let p = tip(&laid[2]);
-        assert_eq!(p.y, 325, "aims at the row's vertical centre");
-        assert!(p.x == 300 || p.x == 500, "tip on the row's near edge");
+        assert_eq!(laid[0].tail.map(|t| t.dir), Some(TailDir::Up));
+        let side: Vec<usize> = (0..3)
+            .filter(|&i| {
+                matches!(
+                    laid[i].tail.map(|t| t.dir),
+                    Some(TailDir::Left) | Some(TailDir::Right)
+                )
+            })
+            .collect();
+        assert!(!side.is_empty(), "some row needed a side callout");
+        for i in side {
+            let p = tip(&laid[i]);
+            assert_eq!(
+                p.y,
+                305 + 10 * i as i32,
+                "aims at the row's vertical centre"
+            );
+            assert!(
+                p.x == 300 + g.cut_in || p.x == 500 - g.cut_in,
+                "tip cuts into the row's near edge, got {}",
+                p.x
+            );
+        }
     }
 
     #[test]
