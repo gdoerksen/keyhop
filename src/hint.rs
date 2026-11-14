@@ -605,15 +605,17 @@ impl HintEngine {
     /// 1. **Near-best keys** — more than [`PREFIX_CAPACITY_PERCENT`] of the
     ///    best key's allowed second keys — come first, strongest finger
     ///    first (index, middle, ring, pinky; unknown fingers last), then
-    ///    more second keys, then alphabet (comfort) order.
-    /// 2. The rest follow, most second keys first.
+    ///    alphabet (comfort) order. Capacity differences inside the cutoff
+    ///    are treated as negligible, so a home-row key beats a top-row key
+    ///    on the same finger.
+    /// 2. The rest follow, most second keys first, then alphabet order.
     ///
     /// QWERTY home row, same-finger rule: `f` / `j` allow 7 second keys
     /// against the best 8 (they can't be followed by `g` / `h`), so they
     /// drop out and the middle fingers lead: `d k s l a f j g h`. For
     /// `a-z` the right pinky's `p` allows the most (25), but the middle
-    /// fingers' `k` / `i` (24) and `d` / `e` / `c` (23) are close enough,
-    /// so they lead instead of `p`. With the extended home row (`; '`) the
+    /// fingers' keys (23–24) are close enough, so they lead in comfort
+    /// order instead: `d k e i c`. With the extended home row (`; '`) the
     /// middle fingers allow 10 and `f` / `j` 9 — exactly 90%, not above
     /// it — so the middle fingers still lead there.
     fn prefix_rank(&self, succ: &[Vec<usize>]) -> Vec<usize> {
@@ -625,10 +627,13 @@ impl HintEngine {
                 .unwrap_or(u8::MAX)
         };
         let mut rank: Vec<usize> = (0..succ.len()).collect();
-        rank.sort_by_key(|&i| {
+        rank.sort_by_cached_key(|&i| {
             let near_best = succ[i].len() * 100 > best * PREFIX_CAPACITY_PERCENT;
-            let finger = if near_best { tier(i) } else { 0 };
-            (!near_best, finger, std::cmp::Reverse(succ[i].len()))
+            if near_best {
+                (false, tier(i), 0, i)
+            } else {
+                (true, 0, best - succ[i].len(), i)
+            }
         });
         rank
     }
@@ -872,16 +877,23 @@ mod tests {
     #[test]
     fn prefix_finger_strength_beats_small_capacity_gain() {
         // Under the same-finger rule 'p' (right pinky) allows 25 second
-        // keys, 'k' / 'i' 24: close enough that the middle finger leads.
+        // keys, the middle fingers' keys 23-24: close enough that they
+        // lead, in comfort order (home-row 'd' before top-row 'i').
         let az = "fjdkslaghrueiwoqptyvmcxzbn";
         let e = HintEngine::new(az).with_min_singles(7).with_key_rule(
             ConsecutiveKeys::NoSameFinger,
             fingers_for(az, &Layout::qwerty(), Geometry::Staggered),
         );
-        let prefixes = prefixes_of(&e.generate(30));
-        assert_eq!(prefixes, vec!['k']);
+        let rank: String = e
+            .prefix_rank(&e.succ_tables[0])
+            .into_iter()
+            .take(5)
+            .map(|i| e.alphabet[i])
+            .collect();
+        assert_eq!(rank, "dkeic");
+        assert_eq!(prefixes_of(&e.generate(30)), vec!['d']);
         let labels = e.generate(60);
-        assert_eq!(prefixes_of(&labels)[..2], ['k', 'i']);
+        assert_eq!(prefixes_of(&labels)[..2], ['d', 'k']);
         assert!(!prefixes_of(&labels).contains(&'p'));
     }
 
