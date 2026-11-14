@@ -182,8 +182,8 @@ impl Finger {
         )
     }
 
-    /// Strength tier: index 0, middle 1, ring 2, pinky 3.
-    fn tier(self) -> u8 {
+    /// Strength tier, strongest first: index 0, middle 1, ring 2, pinky 3.
+    pub fn tier(self) -> u8 {
         match self {
             Finger::LeftIndex | Finger::RightIndex => 0,
             Finger::LeftMiddle | Finger::RightMiddle => 1,

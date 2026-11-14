@@ -113,8 +113,9 @@ pub struct HintConfig {
     ///
     /// Setting this to a positive number reserves at least that many
     /// length-1 hints, then spreads the rest of the count over the
-    /// remaining prefix keys (the keys that lead into the most second
-    /// keys — `d` then `k` on the QWERTY home row). Trades a small average-typing penalty
+    /// remaining prefix keys (the strongest-finger keys that can still
+    /// be followed by nearly every other key — `d` then `k` on the
+    /// QWERTY home row). Trades a small average-typing penalty
     /// for guaranteed one-key reach on the most-likely targets.
     ///
     /// Capped at `n − 1` at runtime (we always leave at least one

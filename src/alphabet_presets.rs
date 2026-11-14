@@ -14,8 +14,9 @@
 //! - **Idempotent**: applying a preset is a pure function — no global
 //!   state, easy to unit-test.
 //! - **Comfort order**: [`crate::HintEngine`] treats alphabet order as
-//!   preference — single-key hints come from the front, prefixes of
-//!   longer hints from the back. Presets are therefore plain *sets* of
+//!   preference — single-key hints and second keys come from the front
+//!   (prefixes are chosen by finger strength and capacity; see
+//!   [`crate::HintEngine::new`]). Presets are therefore plain *sets* of
 //!   keys (`asdfghjkl`, `a-z`), and every built-in alphabet is sorted by
 //!   [`comfort_order`]: strongest finger first (index, middle, ring,
 //!   pinky, then sideways stretches), home row before the top, bottom
