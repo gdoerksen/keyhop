@@ -67,7 +67,7 @@ use windows::Win32::UI::Controls::{
     TTM_ADDTOOLW, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW, UDM_GETPOS32, UDM_SETPOS32,
     UDM_SETRANGE32, UDS_ALIGNRIGHT, UDS_ARROWKEYS, UDS_AUTOBUDDY, UDS_SETBUDDYINT,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GetDlgItem, GetMessageW, GetParent, GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW,
@@ -128,6 +128,8 @@ const LEFT_FIELD_W: i32 = 240;
 const RIGHT_LABEL_X: i32 = 440;
 const RIGHT_FIELD_X: i32 = RIGHT_LABEL_X + LABEL_W + 4;
 const RIGHT_FIELD_W: i32 = 240;
+/// Width of the badge-size spinners; the "Auto" checkbox sits after it.
+const FONT_SPINNER_W: i32 = 80;
 
 /// Width of the colored swatch button next to a hex color edit.
 const SWATCH_W: i32 = 28;
@@ -167,6 +169,8 @@ const ID_KEYBOARD_LAYOUT: usize = 1025;
 const ID_KEYBOARD_GEOMETRY: usize = 1026;
 const ID_CONSECUTIVE_KEYS: usize = 1027;
 const ID_BADGE_SHAPE: usize = 1028;
+const ID_ELEMENT_FONT_AUTO: usize = 1029;
+const ID_WINDOW_FONT_AUTO: usize = 1030;
 
 /// Element badge shape choices, in combo order: (config value, label).
 const BADGE_SHAPE_OPTIONS: [(overlay::BadgeShape, &str); 2] = [
@@ -281,6 +285,10 @@ struct State {
     enable_caching: HWND,
     cache_ttl_ms: HWND,
     element_font_size: HWND,
+    /// "Auto" checkboxes next to the size spinners: checked = save
+    /// `font_size = 0` (DPI-scaled preset size).
+    element_font_auto: HWND,
+    window_font_auto: HWND,
     window_font_size: HWND,
     launch_startup: HWND,
     /// Badge colors/options as loaded at dialog open. Save starts from
@@ -469,6 +477,7 @@ The window picker's setting lives in config.toml ([colors.window] show_leader)."
     pub const ENABLE_CACHING: &str = "Memoize element trees per window so repeat picks (Esc, retry) skip the slow accessibility walk.\n\nDisable only when debugging stale-results bugs; the TTL already keeps drift bounded.";
     pub const CACHE_TTL: &str = "How long an element tree stays cached, in milliseconds.\n\nLower = fresher results when UI changes between picks; higher = faster repeat picks. 500 ms is a good balance.";
     pub const ELEMENT_FONT_SIZE: &str = "Badge label height in pixels for element hints.\n\nThe suggested default is calculated from your monitor's DPI scaling. Increase for better readability on high-DPI screens; decrease for a more compact overlay.";
+    pub const FONT_SIZE_AUTO: &str = "Scale the badge size automatically with the monitor's DPI (saved as font_size = 0). The number shows the size used on your primary monitor.\n\nUntick to pick a fixed size.";
     pub const WINDOW_FONT_SIZE: &str = "Badge label height in pixels for window-picker hints.\n\nThe suggested default is calculated from your monitor's DPI scaling.";
     pub const LAUNCH_STARTUP: &str = "Run keyhop automatically when you sign in to Windows. Implemented by writing to HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run.";
     pub const SAVE: &str = "Apply changes immediately and close. Hotkeys, alphabet, scope, colors, and cache are all hot-reloaded — no restart needed.";
@@ -882,12 +891,24 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         ID_ELEMENT_FONT_SIZE_UD,
         RIGHT_FIELD_X,
         y,
-        80,
+        FONT_SPINNER_W,
         6,
         120,
         el_fs,
     );
     add_tip(tooltip, hwnd, element_font_size, tips::ELEMENT_FONT_SIZE);
+    let element_font_auto = create_checkbox(
+        hwnd,
+        hinstance,
+        "Auto",
+        initial.colors.element.font_size == 0,
+        ID_ELEMENT_FONT_AUTO,
+        RIGHT_FIELD_X + FONT_SPINNER_W + 12,
+        y,
+        RIGHT_FIELD_W - FONT_SPINNER_W - 12,
+    );
+    add_tip(tooltip, hwnd, element_font_auto, tips::FONT_SIZE_AUTO);
+    apply_font_auto(hwnd, ID_ELEMENT_FONT_AUTO);
     y += ROW_H;
 
     let win_fs = if initial.colors.window.font_size > 0 {
@@ -903,12 +924,24 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         ID_WINDOW_FONT_SIZE_UD,
         RIGHT_FIELD_X,
         y,
-        80,
+        FONT_SPINNER_W,
         10,
         120,
         win_fs,
     );
     add_tip(tooltip, hwnd, window_font_size, tips::WINDOW_FONT_SIZE);
+    let window_font_auto = create_checkbox(
+        hwnd,
+        hinstance,
+        "Auto",
+        initial.colors.window.font_size == 0,
+        ID_WINDOW_FONT_AUTO,
+        RIGHT_FIELD_X + FONT_SPINNER_W + 12,
+        y,
+        RIGHT_FIELD_W - FONT_SPINNER_W - 12,
+    );
+    add_tip(tooltip, hwnd, window_font_auto, tips::FONT_SIZE_AUTO);
+    apply_font_auto(hwnd, ID_WINDOW_FONT_AUTO);
     y += ROW_H;
 
     create_label(hwnd, hinstance, "Element badge shape:", RIGHT_LABEL_X, y);
@@ -1102,6 +1135,8 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         cache_ttl_ms,
         element_font_size,
         window_font_size,
+        element_font_auto,
+        window_font_auto,
         launch_startup,
         initial_colors: initial.colors.clone(),
         saved_config: None,
@@ -1518,6 +1553,7 @@ unsafe extern "system" fn window_proc(
                         let _ = DestroyWindow(hwnd);
                     }
                     ID_RESET => on_reset(hwnd),
+                    ID_ELEMENT_FONT_AUTO | ID_WINDOW_FONT_AUTO => apply_font_auto(hwnd, id),
                     other if is_swatch_id(other) => on_swatch_clicked(hwnd, other),
                     _ => {}
                 }
@@ -1879,25 +1915,17 @@ fn collect_config() -> Option<(Config, bool)> {
                 overlay::BadgeShape::Rect => "rect".to_string(),
             }
         };
-        // `0` = auto (DPI-scaled). The dialog shows the DPI-suggested size
-        // for auto; keep `0` unless the user changed that number.
-        let keep_auto = |initial: u8, shown: i32, value: i32| {
-            if initial == 0 && value == shown {
-                0
-            } else {
-                value as u8
-            }
+        // `0` = auto (DPI-scaled preset size), chosen by the Auto boxes.
+        let element_font_size = if unsafe { is_checked(st.element_font_auto) } {
+            0
+        } else {
+            unsafe { spinner_value(st.element_font_size) }.clamp(6, 120) as u8
         };
-        let element_font_size = keep_auto(
-            init.element.font_size,
-            overlay::suggested_element_font_size(),
-            unsafe { spinner_value(st.element_font_size) }.clamp(6, 120),
-        );
-        let window_font_size = keep_auto(
-            init.window.font_size,
-            overlay::suggested_window_font_size(),
-            unsafe { spinner_value(st.window_font_size) }.clamp(10, 120),
-        );
+        let window_font_size = if unsafe { is_checked(st.window_font_auto) } {
+            0
+        } else {
+            unsafe { spinner_value(st.window_font_size) }.clamp(10, 120) as u8
+        };
         let launch_startup = unsafe { is_checked(st.launch_startup) };
 
         // For non-Custom presets the "custom alphabet" field is a
@@ -2004,6 +2032,34 @@ unsafe fn trackbar_pos(hwnd: HWND) -> u8 {
     }
     let raw = SendMessageW(hwnd, TBM_GETPOS, WPARAM(0), LPARAM(0)).0 as i32;
     raw.clamp(0, 100) as u8
+}
+
+/// Sync a size spinner with its "Auto" checkbox: auto greys out the
+/// spinner and shows the DPI-suggested size; manual re-enables it.
+unsafe fn apply_font_auto(parent: HWND, auto_id: usize) {
+    let (edit_id, ud_id, suggested) = match auto_id {
+        ID_ELEMENT_FONT_AUTO => (
+            ID_ELEMENT_FONT_SIZE,
+            ID_ELEMENT_FONT_SIZE_UD,
+            overlay::suggested_element_font_size(),
+        ),
+        _ => (
+            ID_WINDOW_FONT_SIZE,
+            ID_WINDOW_FONT_SIZE_UD,
+            overlay::suggested_window_font_size(),
+        ),
+    };
+    let item = |id: usize| GetDlgItem(parent, id as i32).unwrap_or(HWND(std::ptr::null_mut()));
+    let auto = is_checked(item(auto_id));
+    let ud = item(ud_id);
+    if auto && !ud.0.is_null() {
+        SendMessageW(ud, UDM_SETPOS32, WPARAM(0), LPARAM(suggested as isize));
+    }
+    for h in [item(edit_id), ud] {
+        if !h.0.is_null() {
+            let _ = EnableWindow(h, !auto);
+        }
+    }
 }
 
 /// Current value of an UpDown spinner, read via UDM_GETPOS32 so the
