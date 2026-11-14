@@ -283,20 +283,12 @@ struct State {
     element_font_size: HWND,
     window_font_size: HWND,
     launch_startup: HWND,
-    /// Element picker's leader-line preference at dialog open. Used to
-    /// decide whether to write `show_leader = Some(...)` or leave it as
-    /// `None` (preset default): we only persist an explicit override
-    /// when the user actually toggled the checkbox.
-    initial_show_leader: Option<bool>,
-    /// Window picker's leader-line preference at dialog open. It has no
-    /// control in the dialog, so it's written back unchanged.
-    initial_window_show_leader: Option<bool>,
-    /// Element and window `shape` strings at dialog open. The element
-    /// value is kept verbatim (often `""` = preset default) unless the
-    /// user changes the combo; the window value has no UI and is always
-    /// written back unchanged.
-    initial_element_shape: String,
-    initial_window_shape: String,
+    /// Badge colors/options as loaded at dialog open. Save starts from
+    /// this and overrides only what the dialog controls, so fields with
+    /// no UI (badge_fg, border, leader_color, the window picker's
+    /// show_leader / shape) survive, and untouched controls keep the
+    /// file's value (e.g. `None` / `""` / `0` = preset default).
+    initial_colors: ColorConfig,
     /// `Some(_)` once the user clicks Save (or Reset to Defaults) and
     /// the resulting [`Config`] has been written to disk. Surfaced to
     /// [`show`] so the caller can hot-apply without re-reading the file.
@@ -1111,10 +1103,7 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         element_font_size,
         window_font_size,
         launch_startup,
-        initial_show_leader,
-        initial_window_show_leader: initial.colors.window.show_leader,
-        initial_element_shape: initial.colors.element.shape.clone(),
-        initial_window_shape: initial.colors.window.shape.clone(),
+        initial_colors: initial.colors.clone(),
         saved_config: None,
     });
     STATE.with(|s| *s.borrow_mut() = Some(state));
@@ -1864,11 +1853,13 @@ fn collect_config() -> Option<(Config, bool)> {
         // Keep the file's value (often None = preset default) unless the
         // user actually changed the checkbox from how we showed it, so
         // saving other settings never hard-pins the leader preference.
-        let shown_show_leader = st
-            .initial_show_leader
+        let init = &st.initial_colors;
+        let shown_show_leader = init
+            .element
+            .show_leader
             .unwrap_or(overlay::HintStyle::elements().show_leader);
         let show_leader = if show_leader_checked == shown_show_leader {
-            st.initial_show_leader
+            init.element.show_leader
         } else {
             Some(show_leader_checked)
         };
@@ -1878,18 +1869,35 @@ fn collect_config() -> Option<(Config, bool)> {
             .get(unsafe { combo_selection(st.badge_shape) })
             .map(|(shape, _)| *shape)
             .unwrap_or(overlay::BadgeShape::Callout);
-        let initial_shape = overlay::BadgeShape::from_config(&st.initial_element_shape)
+        let initial_shape = overlay::BadgeShape::from_config(&init.element.shape)
             .unwrap_or(overlay::HintStyle::elements().shape);
         let element_shape = if chosen_shape == initial_shape {
-            st.initial_element_shape.clone()
+            init.element.shape.clone()
         } else {
             match chosen_shape {
                 overlay::BadgeShape::Callout => "callout".to_string(),
                 overlay::BadgeShape::Rect => "rect".to_string(),
             }
         };
-        let element_font_size = unsafe { spinner_value(st.element_font_size) }.clamp(6, 120) as u8;
-        let window_font_size = unsafe { spinner_value(st.window_font_size) }.clamp(10, 120) as u8;
+        // `0` = auto (DPI-scaled). The dialog shows the DPI-suggested size
+        // for auto; keep `0` unless the user changed that number.
+        let keep_auto = |initial: u8, shown: i32, value: i32| {
+            if initial == 0 && value == shown {
+                0
+            } else {
+                value as u8
+            }
+        };
+        let element_font_size = keep_auto(
+            init.element.font_size,
+            overlay::suggested_element_font_size(),
+            unsafe { spinner_value(st.element_font_size) }.clamp(6, 120),
+        );
+        let window_font_size = keep_auto(
+            init.window.font_size,
+            overlay::suggested_window_font_size(),
+            unsafe { spinner_value(st.window_font_size) }.clamp(10, 120),
+        );
         let launch_startup = unsafe { is_checked(st.launch_startup) };
 
         // For non-Custom presets the "custom alphabet" field is a
@@ -1936,23 +1944,17 @@ fn collect_config() -> Option<(Config, bool)> {
             colors: ColorConfig {
                 element: BadgeColors {
                     badge_bg: element_bg,
-                    badge_fg: String::new(),
-                    border: String::new(),
                     opacity: element_opacity,
                     show_leader,
-                    leader_color: String::new(),
                     font_size: element_font_size,
                     shape: element_shape,
+                    ..init.element.clone()
                 },
                 window: BadgeColors {
                     badge_bg: window_bg,
-                    badge_fg: String::new(),
-                    border: String::new(),
                     opacity: window_opacity,
-                    show_leader: st.initial_window_show_leader,
-                    leader_color: String::new(),
                     font_size: window_font_size,
-                    shape: st.initial_window_shape.clone(),
+                    ..init.window.clone()
                 },
             },
             startup: StartupConfig {

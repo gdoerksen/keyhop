@@ -441,6 +441,9 @@ struct LaidHint {
     /// click target — useful when smart positioning shoved the badge off
     /// the element to avoid a collision.
     target_rect: RECT,
+    /// Drawn as a callout sprite (rounded body, with or without a tail).
+    /// Decided once in [`lay_out`]: callout shape and no extra pill.
+    callout: bool,
     /// Callout tail pointing at the target. `Some` only when a callout
     /// position won layout; `badge_rect` is then the callout body.
     tail: Option<Tail>,
@@ -500,6 +503,11 @@ impl CalloutGeom {
 }
 
 impl HintStyle {
+    /// Callout geometry when this style draws callouts, else `None`.
+    fn callout_geom_if_enabled(&self) -> Option<CalloutGeom> {
+        (self.shape == BadgeShape::Callout).then(|| self.callout_geom())
+    }
+
     fn callout_geom(&self) -> CalloutGeom {
         let f = self.font_height as f32;
         let radius = ((f * 0.3).round() as i32).max(2);
@@ -658,10 +666,10 @@ impl OverlayState {
         // weight — visible but clearly secondary to the matchable badge.
         let extra_font = create_font((style.font_height * 3) / 4, FW_NORMAL.0 as i32);
         let laid = lay_out(&hints, &style, origin_x, origin_y);
-        let callout_geom = (style.shape == BadgeShape::Callout).then(|| style.callout_geom());
+        let callout_geom = style.callout_geom_if_enabled();
         let mut sprites = HashMap::new();
         if let Some(g) = callout_geom {
-            for h in laid.iter().filter(|h| h.extra.is_none()) {
+            for h in laid.iter().filter(|h| h.callout) {
                 sprites.entry(SpriteKey::for_hint(h)).or_insert_with(|| {
                     build_callout_sprite(
                         h.badge_rect.right - h.badge_rect.left,
@@ -765,7 +773,7 @@ impl OverlayState {
             self.draw_leader_dib(bits, dib_w, dib_h, laid);
         }
 
-        if let (Some(g), None) = (self.callout_geom, &laid.extra) {
+        if let (Some(g), true) = (self.callout_geom, laid.callout) {
             if let Some(sprite) = self.sprites.get(&SpriteKey::for_hint(laid)) {
                 self.draw_callout(hdc, bits, dib_w, dib_h, laid, sprite, g);
                 return;
@@ -929,9 +937,10 @@ impl OverlayState {
         // badge↔target association is immediate (yellow badge = yellow
         // box around its element). Drawn directly into the DIB so it's
         // already alpha=255 — GDI's FrameRect would have left alpha=0.
-        // Callout mode never outlines targets: callouts point with their
-        // tail, and a tail-less fallback gets just the connector below.
-        if self.style.shape != BadgeShape::Callout {
+        // Callouts never outline their target: they point with their
+        // tail, and a tail-less fallback callout gets just the connector
+        // below. Rect badges (incl. extra-pill hints in callout mode) do.
+        if !laid.callout {
             frame_rect_argb(bits, dib_w, dib_h, target, self.style.badge_bg);
         }
 
@@ -1286,7 +1295,7 @@ fn lay_out(hints: &[Hint], style: &HintStyle, origin_x: i32, origin_y: i32) -> V
 
     // Callouts only make sense for a lone label: a hint with an extra
     // title pill (window picker) keeps the rectangular layout.
-    let callout_geom = (style.shape == BadgeShape::Callout).then(|| style.callout_geom());
+    let callout_geom = style.callout_geom_if_enabled();
 
     for &i in &order {
         let h = &hints[i];
@@ -1348,6 +1357,7 @@ fn lay_out(hints: &[Hint], style: &HintStyle, origin_x: i32, origin_y: i32) -> V
                     badge_rect,
                     extra_rect: None,
                     target_rect,
+                    callout: true,
                     tail: Some(tail),
                 });
                 continue;
@@ -1473,6 +1483,7 @@ fn lay_out(hints: &[Hint], style: &HintStyle, origin_x: i32, origin_y: i32) -> V
             badge_rect,
             extra_rect,
             target_rect,
+            callout: callout.is_some(),
             tail: None,
         });
     }
@@ -2585,14 +2596,27 @@ pub mod bench {
     use super::*;
     use windows::Win32::UI::WindowsAndMessaging::{SM_CXSCREEN, SM_CYSCREEN};
 
+    /// Make the process per-monitor DPI aware, as the real overlay is.
+    /// Must run before any DPI or geometry query, or the first queries
+    /// see virtualised 96-DPI values.
+    fn ensure_dpi_aware() {
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+    }
+
+    /// Primary monitor DPI scale (1.0 = 96 DPI), measured DPI-aware.
+    pub fn dpi_scale() -> f32 {
+        ensure_dpi_aware();
+        primary_monitor_dpi_scale()
+    }
+
     /// Size of the primary monitor in physical pixels. Synthetic hints
     /// are placed on it so `lay_out`'s per-hint monitor query resolves
     /// the same way on every run.
     pub fn primary_size() -> (i32, i32) {
-        unsafe {
-            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-            (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
-        }
+        ensure_dpi_aware();
+        unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
     }
 
     /// Tiny deterministic PRNG (LCG) so scenarios are identical run to run.
@@ -3311,6 +3335,7 @@ mod callout_tests {
         h.extra = Some("title".into());
         let laid = lay_out(&[h], &style(), 0, 0);
         assert!(laid[0].tail.is_none());
+        assert!(!laid[0].callout, "drawn (and outlined) as a rect badge");
         assert!(laid[0].extra_rect.is_some());
     }
 
@@ -3415,10 +3440,11 @@ mod callout_tests {
     }
 
     #[test]
-    fn callout_mode_never_outlines_targets() {
-        // A hint whose callout had no room for a tail must still not get
-        // a target outline in callout mode; only rect mode outlines.
-        let hint = LaidHint {
+    fn callouts_never_outline_targets() {
+        // A callout with no room for a tail must still not get a target
+        // outline; a rect badge (e.g. an extra-pill hint in callout
+        // mode) still does.
+        let hint = |callout: bool| LaidHint {
             label: "a".into(),
             extra: None,
             badge_rect: RECT {
@@ -3434,22 +3460,19 @@ mod callout_tests {
                 right: 30,
                 bottom: 30,
             },
+            callout,
             tail: None,
         };
-        let outline_at_corner = |shape: BadgeShape| {
-            let style = HintStyle {
-                shape,
-                ..HintStyle::elements()
-            };
-            let state = unsafe { OverlayState::new(Vec::new(), style, 0, 0) };
+        let outline_at_corner = |callout: bool| {
+            let state = unsafe { OverlayState::new(Vec::new(), HintStyle::elements(), 0, 0) };
             let mut buf = vec![0u8; 32 * 32 * 4];
-            unsafe { state.draw_leader_dib(buf.as_mut_ptr(), 32, 32, &hint) };
+            unsafe { state.draw_leader_dib(buf.as_mut_ptr(), 32, 32, &hint(callout)) };
             // Bottom-right corner of the target frame, away from any arrow.
             let i = (29 * 32 + 29) * 4;
             buf[i + 3]
         };
-        assert_eq!(outline_at_corner(BadgeShape::Callout), 0);
-        assert_eq!(outline_at_corner(BadgeShape::Rect), 255);
+        assert_eq!(outline_at_corner(true), 0);
+        assert_eq!(outline_at_corner(false), 255);
     }
 
     #[test]

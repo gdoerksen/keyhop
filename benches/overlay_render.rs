@@ -10,7 +10,7 @@
 mod benches {
     use criterion::{black_box, BenchmarkId, Criterion};
     use keyhop::windows::overlay::bench::{self, Prepared, Surface};
-    use keyhop::windows::overlay::{primary_monitor_dpi_scale, BadgeShape, Hint, HintStyle};
+    use keyhop::windows::overlay::{BadgeShape, Hint, HintStyle};
 
     const COUNTS: [usize; 3] = [50, 300, 800];
 
@@ -18,7 +18,7 @@ mod benches {
 
     /// Style variants under test, DPI-scaled the same way a real pick is.
     fn styles() -> Vec<(&'static str, HintStyle)> {
-        let scale = primary_monitor_dpi_scale();
+        let scale = bench::dpi_scale();
         let callout = HintStyle::elements().scaled_for_dpi(scale);
         let rect = HintStyle {
             shape: BadgeShape::Rect,
