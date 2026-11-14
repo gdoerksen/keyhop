@@ -10,21 +10,49 @@
 mod benches {
     use criterion::{black_box, BenchmarkId, Criterion};
     use keyhop::windows::overlay::bench::{self, Prepared, Surface};
-    use keyhop::windows::overlay::{primary_monitor_dpi_scale, Hint, HintStyle};
+    use keyhop::windows::overlay::{primary_monitor_dpi_scale, BadgeShape, Hint, HintStyle};
 
     const COUNTS: [usize; 3] = [50, 300, 800];
+
+    type Scenario = fn(usize) -> Vec<Hint>;
 
     /// Style variants under test, DPI-scaled the same way a real pick is.
     fn styles() -> Vec<(&'static str, HintStyle)> {
         let scale = primary_monitor_dpi_scale();
-        vec![("rect", HintStyle::elements().scaled_for_dpi(scale))]
+        let callout = HintStyle::elements().scaled_for_dpi(scale);
+        let rect = HintStyle {
+            shape: BadgeShape::Rect,
+            ..callout
+        };
+        vec![("rect", rect), ("callout", callout)]
     }
 
-    fn scenarios() -> Vec<(&'static str, fn(usize) -> Vec<Hint>)> {
+    fn scenarios() -> Vec<(&'static str, Scenario)> {
         vec![
-            ("scattered", bench::scattered_hints as fn(usize) -> Vec<Hint>),
+            ("scattered", bench::scattered_hints as Scenario),
             ("list", bench::dense_list_hints),
         ]
+    }
+
+    /// Not a timing: prints how each scenario was placed under each
+    /// shape, so layout quality can be judged next to the numbers.
+    pub fn placement_report(_: &mut Criterion) {
+        println!(
+            "
+placement mix [below, above, slid, side, no-tail] / sprites:"
+        );
+        for (style_name, style) in styles() {
+            for (scenario, make) in scenarios() {
+                for n in COUNTS {
+                    let p = Prepared::new(make(n), style);
+                    println!(
+                        "  {style_name}/{scenario}/{n}: {:?} / {}",
+                        p.placement_mix(),
+                        p.sprite_count()
+                    );
+                }
+            }
+        }
     }
 
     pub fn lay_out(c: &mut Criterion) {
@@ -99,6 +127,7 @@ mod benches {
 #[cfg(windows)]
 criterion::criterion_group!(
     overlay,
+    benches::placement_report,
     benches::lay_out,
     benches::prepare,
     benches::clear,

@@ -42,9 +42,9 @@ use windows::Win32::Graphics::Gdi::{
     DrawTextW, FillRect, GetDC, GetMonitorInfoW, MonitorFromRect, ReleaseDC, SelectObject,
     SetBkMode, SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
     BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_TOP, FF_DONTCARE,
-    FW_BOLD, FW_NORMAL, HBITMAP, HDC, HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    OUT_DEFAULT_PRECIS, TRANSPARENT,
+    DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_TOP,
+    DT_VCENTER, FF_DONTCARE, FW_BOLD, FW_NORMAL, HBITMAP, HDC, HFONT, HGDIOBJ, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -146,6 +146,29 @@ pub struct PickResult {
     pub modifier: PickModifier,
 }
 
+/// Outline of a hint badge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BadgeShape {
+    /// Flat rectangle anchored in a corner of the element (the classic
+    /// vimium look, and the window picker's badge + title pill).
+    Rect,
+    /// Rounded label just below the element (or above / beside it when
+    /// that collides) with a small tail pointing at the element.
+    Callout,
+}
+
+impl BadgeShape {
+    /// Parse the config spelling (`"rect"` / `"callout"`, any case).
+    /// Empty or unknown → `None` (caller keeps the preset default).
+    pub fn from_config(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "rect" => Some(Self::Rect),
+            "callout" => Some(Self::Callout),
+            _ => None,
+        }
+    }
+}
+
 /// Visual presets for the overlay. The element and window pickers use
 /// different sizing/colors so the user can tell at a glance which mode
 /// they're in.
@@ -204,6 +227,8 @@ pub struct HintStyle {
     /// When `false`, the `font_height` is used as-is (user chose a
     /// concrete size).
     pub auto_scale_dpi: bool,
+    /// Badge outline. See [`BadgeShape`].
+    pub shape: BadgeShape,
 }
 
 impl HintStyle {
@@ -255,6 +280,7 @@ impl HintStyle {
             // visible so the user can confirm what they're about to click.
             prefer_inside_anchor: true,
             auto_scale_dpi: true,
+            shape: BadgeShape::Callout,
         }
     }
 
@@ -288,6 +314,7 @@ impl HintStyle {
             // would push it above the monitor for any window at y == 0.
             prefer_inside_anchor: true,
             auto_scale_dpi: true,
+            shape: BadgeShape::Rect,
         }
     }
 
@@ -320,6 +347,7 @@ impl HintStyle {
             style.font_height = c.font_size as i32;
             style.auto_scale_dpi = false;
         }
+        apply_shape_override(&mut style.shape, &c.shape);
         style
     }
 
@@ -338,6 +366,7 @@ impl HintStyle {
             style.font_height = c.font_size as i32;
             style.auto_scale_dpi = false;
         }
+        apply_shape_override(&mut style.shape, &c.shape);
         style
     }
 }
@@ -351,6 +380,16 @@ fn apply_opacity_override(target: &mut u8, percent: u8) {
     }
     let clamped = percent.min(100) as u32;
     *target = (clamped * 255 / 100) as u8;
+}
+
+fn apply_shape_override(target: &mut BadgeShape, value: &str) {
+    if value.trim().is_empty() {
+        return;
+    }
+    match BadgeShape::from_config(value) {
+        Some(shape) => *target = shape,
+        None => tracing::warn!(value = %value, "unknown badge shape in config; keeping default"),
+    }
 }
 
 fn apply_color_override(target: &mut COLORREF, hex: &str) {
@@ -402,6 +441,175 @@ struct LaidHint {
     /// click target — useful when smart positioning shoved the badge off
     /// the element to avoid a collision.
     target_rect: RECT,
+    /// Callout tail pointing at the target. `Some` only when a callout
+    /// position won layout; `badge_rect` is then the callout body.
+    tail: Option<Tail>,
+}
+
+/// Direction a callout's tail points, i.e. which body edge it sits on.
+/// A callout *below* its element has an `Up` tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TailDir {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// Callout tail: direction plus where the tip sits along its edge,
+/// measured from `badge_rect.left` (Up/Down) or `badge_rect.top`
+/// (Left/Right).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Tail {
+    dir: TailDir,
+    offset: i32,
+}
+
+/// Callout dimensions derived from the (already DPI-scaled) font size.
+#[derive(Debug, Clone, Copy)]
+struct CalloutGeom {
+    /// Tail length, from body edge to tip.
+    tail_h: i32,
+    /// Half the tail's base width.
+    tail_half_w: i32,
+    /// Body corner radius.
+    radius: i32,
+    /// Body height.
+    body_h: i32,
+    /// Horizontal padding between body edge and label text. Never less
+    /// than `radius`, so text stays clear of the rounded corners.
+    pad_x: i32,
+}
+
+impl CalloutGeom {
+    /// Closest the tail's centre may sit to a body corner without its
+    /// base running into the rounded corner.
+    fn inner(&self) -> i32 {
+        self.radius + self.tail_half_w
+    }
+
+    /// Body width for a label `label_w` pixels wide. At least wide
+    /// enough to fit a centred tail clear of both corners.
+    fn body_width(&self, label_w: i32) -> i32 {
+        (label_w + 2 * self.pad_x).max(2 * self.inner() + 2)
+    }
+}
+
+impl HintStyle {
+    fn callout_geom(&self) -> CalloutGeom {
+        let f = self.font_height as f32;
+        let radius = ((f * 0.3).round() as i32).max(2);
+        let body_h = self.font_height + 2 * self.padding_y.max(2);
+        let tail_h = ((f * 0.45).round() as i32).max(4);
+        // Cap the base so a sideways tail still fits between the
+        // corners of the (short) body.
+        let tail_half_w = (((tail_h as f32) * 0.85).round() as i32)
+            .min((body_h - 2 * radius) / 2)
+            .max(2);
+        CalloutGeom {
+            tail_h,
+            tail_half_w,
+            radius,
+            body_h,
+            pad_x: self.padding_x.max(radius),
+        }
+    }
+}
+
+/// Candidate callout placements around `target`, in preference order:
+/// below centred, above centred, below slid left/right, above slid
+/// left/right, then to the right and left of the element. Each entry is
+/// `(body, tail, bbox)` where `bbox` is the body plus its tail, the
+/// area that must be free of other badges.
+///
+/// Up/down tails aim at the target's horizontal centre on its near
+/// edge; sideways tails aim at its vertical centre. Sliding moves the
+/// body so the tip sits at the body's inner left or right edge, which
+/// lets a callout dodge a neighbour while still pointing at its element.
+fn callout_candidates(
+    target: &RECT,
+    body_w: i32,
+    g: CalloutGeom,
+) -> SmallVec<[(RECT, Tail, RECT); 8]> {
+    let cx = (target.left + target.right) / 2;
+    let cy = (target.top + target.bottom) / 2;
+    let inner = g.inner();
+    let mut out = SmallVec::new();
+
+    let vertical = |dir: TailDir, offset: i32| {
+        let left = cx - offset;
+        let (top, bbox_top, bbox_bottom) = match dir {
+            TailDir::Up => {
+                let top = target.bottom + g.tail_h;
+                (top, target.bottom, top + g.body_h)
+            }
+            _ => {
+                let top = target.top - g.tail_h - g.body_h;
+                (top, top, target.top)
+            }
+        };
+        let body = RECT {
+            left,
+            top,
+            right: left + body_w,
+            bottom: top + g.body_h,
+        };
+        let bbox = RECT {
+            top: bbox_top,
+            bottom: bbox_bottom,
+            ..body
+        };
+        (body, Tail { dir, offset }, bbox)
+    };
+    let centre = body_w / 2;
+    out.push(vertical(TailDir::Up, centre));
+    out.push(vertical(TailDir::Down, centre));
+    for dir in [TailDir::Up, TailDir::Down] {
+        out.push(vertical(dir, inner));
+        out.push(vertical(dir, body_w - inner));
+    }
+
+    let top = cy - g.body_h / 2;
+    let offset = cy - top;
+    // Right of the element, tail pointing left at it.
+    let left = target.right + g.tail_h;
+    let body = RECT {
+        left,
+        top,
+        right: left + body_w,
+        bottom: top + g.body_h,
+    };
+    out.push((
+        body,
+        Tail {
+            dir: TailDir::Left,
+            offset,
+        },
+        RECT {
+            left: target.right,
+            ..body
+        },
+    ));
+    // Left of the element, tail pointing right at it.
+    let right = target.left - g.tail_h;
+    let body = RECT {
+        left: right - body_w,
+        top,
+        right,
+        bottom: top + g.body_h,
+    };
+    out.push((
+        body,
+        Tail {
+            dir: TailDir::Right,
+            offset,
+        },
+        RECT {
+            right: target.left,
+            ..body
+        },
+    ));
+    out
 }
 
 struct OverlayState {
@@ -422,6 +630,12 @@ struct OverlayState {
     done: bool,
     label_font: HFONT,
     extra_font: HFONT,
+    /// Callout dimensions, `Some` when `style.shape` is `Callout`.
+    callout_geom: Option<CalloutGeom>,
+    /// Pre-rendered callout bodies (shape + gradient + border + shadow),
+    /// one per distinct size/tail combination in `laid`. Built once at
+    /// pick start so keystroke re-renders only blit.
+    sprites: HashMap<SpriteKey, Sprite>,
 }
 
 impl OverlayState {
@@ -431,6 +645,22 @@ impl OverlayState {
         // weight — visible but clearly secondary to the matchable badge.
         let extra_font = create_font((style.font_height * 3) / 4, FW_NORMAL.0 as i32);
         let laid = lay_out(&hints, &style, origin_x, origin_y);
+        let callout_geom = (style.shape == BadgeShape::Callout).then(|| style.callout_geom());
+        let mut sprites = HashMap::new();
+        if let Some(g) = callout_geom {
+            for h in laid.iter().filter(|h| h.extra.is_none()) {
+                sprites.entry(SpriteKey::for_hint(h)).or_insert_with(|| {
+                    build_callout_sprite(
+                        h.badge_rect.right - h.badge_rect.left,
+                        h.badge_rect.bottom - h.badge_rect.top,
+                        g,
+                        h.tail,
+                        style.badge_bg,
+                        style.border,
+                    )
+                });
+            }
+        }
         Self {
             laid,
             style,
@@ -440,6 +670,8 @@ impl OverlayState {
             done: false,
             label_font,
             extra_font,
+            callout_geom,
+            sprites,
         }
     }
 
@@ -514,8 +746,17 @@ impl OverlayState {
         // These go straight into the DIB byte buffer because GDI's
         // line/frame/polygon operations leave the alpha channel at 0,
         // which would make them invisible after UpdateLayeredWindow.
-        if self.style.show_leader {
+        // A callout's tail already points at its element, so the outline
+        // and connector are only for tail-less badges.
+        if self.style.show_leader && laid.tail.is_none() {
             self.draw_leader_dib(bits, dib_w, dib_h, laid);
+        }
+
+        if let (Some(g), None) = (self.callout_geom, &laid.extra) {
+            if let Some(sprite) = self.sprites.get(&SpriteKey::for_hint(laid)) {
+                self.draw_callout(hdc, bits, dib_w, dib_h, laid, sprite, g);
+                return;
+            }
         }
 
         // -- matchable badge --
@@ -597,6 +838,58 @@ impl OverlayState {
             set_alpha_in_rect(bits, dib_w, dib_h, extra_rect, 255);
             frame_rect_argb(bits, dib_w, dib_h, extra_rect, self.style.border);
         }
+    }
+
+    /// Blit the cached callout sprite, then draw the label centred in
+    /// the body. GDI zeroes alpha on glyph pixels, so alpha is restored
+    /// over the text rect afterwards. That rect is kept clear of the
+    /// rounded corners and the border, so every pixel in it is opaque
+    /// body fill and lifting it to 255 is exact.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_callout(
+        &self,
+        hdc: HDC,
+        bits: *mut u8,
+        dib_w: i32,
+        dib_h: i32,
+        laid: &LaidHint,
+        sprite: &Sprite,
+        g: CalloutGeom,
+    ) {
+        let body = &laid.badge_rect;
+        blit_sprite(
+            bits,
+            dib_w,
+            dib_h,
+            sprite,
+            body.left - sprite.body_x,
+            body.top - sprite.body_y,
+        );
+
+        let text_rect = RECT {
+            left: body.left + g.radius,
+            top: body.top + 1,
+            right: body.right - g.radius,
+            bottom: body.bottom - 1,
+        };
+        let flags = DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
+        let old = SelectObject(hdc, HGDIOBJ(self.label_font.0));
+        let mut wide: Vec<u16> = laid.label.encode_utf16().collect();
+        if self.style.text_shadow {
+            let mut shadow_rect = RECT {
+                left: text_rect.left + 1,
+                top: text_rect.top + 1,
+                right: text_rect.right + 1,
+                bottom: text_rect.bottom + 1,
+            };
+            let _ = SetTextColor(hdc, COLORREF(0x00404040));
+            DrawTextW(hdc, &mut wide, &mut shadow_rect, flags);
+        }
+        let _ = SetTextColor(hdc, self.style.badge_fg);
+        let mut rect = text_rect;
+        DrawTextW(hdc, &mut wide, &mut rect, flags);
+        let _ = SelectObject(hdc, old);
+        set_alpha_in_rect(bits, dib_w, dib_h, &text_rect, 255);
     }
 
     /// Visually associate the badge with its click target.
@@ -974,11 +1267,19 @@ fn lay_out(hints: &[Hint], style: &HintStyle, origin_x: i32, origin_y: i32) -> V
     let mut placed: Vec<RECT> = Vec::with_capacity(hints.len());
     let mut grid = SpatialGrid::with_capacity(hints.len());
 
+    // Callouts only make sense for a lone label: a hint with an extra
+    // title pill (window picker) keeps the rectangular layout.
+    let callout_geom = (style.shape == BadgeShape::Callout).then(|| style.callout_geom());
+
     for &i in &order {
         let h = &hints[i];
+        let callout = callout_geom.filter(|_| h.extra.is_none());
 
         let label_chars = h.label.chars().count() as i32;
-        let badge_w = label_chars * label_glyph_w + style.padding_x * 2;
+        let (badge_w, row_h) = match callout {
+            Some(g) => (g.body_width(label_chars * label_glyph_w), g.body_h),
+            None => (label_chars * label_glyph_w + style.padding_x * 2, row_h),
+        };
 
         let extra_w = h.extra.as_ref().map(|s| {
             let chars = s.chars().count().min(MAX_EXTRA_CHARS) as i32;
@@ -998,6 +1299,43 @@ fn lay_out(hints: &[Hint], style: &HintStyle, origin_x: i32, origin_y: i32) -> V
         let monitor_client = unsafe {
             monitor_for_bounds(&h.bounds).map(|m| screen_to_client_rect(m, origin_x, origin_y))
         };
+
+        // Element rect in client space. Callouts aim their tail at it,
+        // and the leader-line painter needs it to figure out where each
+        // badge should point.
+        let target_rect = RECT {
+            left: h.bounds.x - origin_x,
+            top: h.bounds.y - origin_y,
+            right: h.bounds.x - origin_x + h.bounds.width,
+            bottom: h.bounds.y - origin_y + h.bounds.height,
+        };
+
+        // Phase 0 (callout shape): below / above / slid / beside the
+        // element with a tail on it. First spot that is free and on the
+        // element's monitor wins; otherwise fall through to the corner
+        // positions below, drawn as a rounded badge without a tail.
+        if let Some(g) = callout {
+            let spot = callout_candidates(&target_rect, badge_w, g)
+                .into_iter()
+                .find(|(_, _, bbox)| {
+                    monitor_client.map_or(true, |m| rect_inside_monitor(bbox, &m))
+                        && !grid.any_intersects(bbox, &placed)
+                });
+            if let Some((badge_rect, tail, bbox)) = spot {
+                let idx = placed.len();
+                placed.push(bbox);
+                grid.insert(idx, &bbox);
+                result[i] = Some(LaidHint {
+                    label: h.label.clone(),
+                    extra: None,
+                    badge_rect,
+                    extra_rect: None,
+                    target_rect,
+                    tail: Some(tail),
+                });
+                continue;
+            }
+        }
 
         // Phase 1: try each anchor strategy in order. The first one that
         // doesn't collide with an already-placed badge AND fits on the
@@ -1112,20 +1450,13 @@ fn lay_out(hints: &[Hint], style: &HintStyle, origin_x: i32, origin_y: i32) -> V
         let idx = placed.len();
         placed.push(bbox);
         grid.insert(idx, &bbox);
-        // Element rect in client space — the leader-line painter needs
-        // it later to figure out where each badge should point.
-        let target_rect = RECT {
-            left: h.bounds.x - origin_x,
-            top: h.bounds.y - origin_y,
-            right: h.bounds.x - origin_x + h.bounds.width,
-            bottom: h.bounds.y - origin_y + h.bounds.height,
-        };
         result[i] = Some(LaidHint {
             label: h.label.clone(),
             extra: h.extra.clone(),
             badge_rect,
             extra_rect,
             target_rect,
+            tail: None,
         });
     }
 
@@ -1933,6 +2264,298 @@ unsafe fn fill_triangle_argb(
     }
 }
 
+// -- Callout sprites ---------------------------------------------------
+//
+// A callout (rounded body + tail + border + gradient + drop shadow) is
+// rendered once per distinct size/tail into a small premultiplied BGRA
+// buffer, then blitted per hint. Edges are anti-aliased from signed
+// distances (one evaluation per pixel), and the shadow blur happens at
+// build time only, so per-frame cost is a copy plus the label text.
+
+/// Drop-shadow offset (down) and box-blur radius, in pixels.
+const SHADOW_OFFSET: i32 = 2;
+const SHADOW_BLUR: i32 = 2;
+/// Shadow opacity (0..1), as in Homerow's `rgba(0,0,0,0.2)`.
+const SHADOW_ALPHA: f32 = 0.2;
+
+/// Cache key: every callout with the same body size and tail placement
+/// is pixel-identical apart from its label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SpriteKey {
+    w: i32,
+    h: i32,
+    tail: Option<Tail>,
+}
+
+impl SpriteKey {
+    fn for_hint(h: &LaidHint) -> Self {
+        Self {
+            w: h.badge_rect.right - h.badge_rect.left,
+            h: h.badge_rect.bottom - h.badge_rect.top,
+            tail: h.tail,
+        }
+    }
+}
+
+/// Pre-rendered callout.
+struct Sprite {
+    w: i32,
+    h: i32,
+    /// Where the body's top-left sits inside the sprite (the rest is
+    /// tail and shadow margin).
+    body_x: i32,
+    body_y: i32,
+    /// Premultiplied BGRA, row-major, `w * h` pixels.
+    px: Vec<[u8; 4]>,
+    /// Per row, the `[start, end)` columns that aren't fully
+    /// transparent, so blits skip empty corners and margins.
+    spans: Vec<(i32, i32)>,
+}
+
+/// Blend two colors: `t = 0` → `a`, `t = 1` → `b`. Returns floats in
+/// 0..=255 in DIB byte order `[b, g, r]` (`COLORREF` is `0x00BBGGRR`,
+/// red in the low byte).
+fn mix_bgr(a: COLORREF, b: COLORREF, t: f32) -> [f32; 3] {
+    let ch = |c: COLORREF, shift: u32| ((c.0 >> shift) & 0xFF) as f32;
+    [16, 8, 0].map(|s| ch(a, s) + (ch(b, s) - ch(a, s)) * t)
+}
+
+/// Signed distance from `(px, py)` to a rounded box centred at
+/// `(cx, cy)` with half-extents `(hw, hh)` and corner radius `r`.
+/// Negative inside.
+fn sd_round_box(px: f32, py: f32, cx: f32, cy: f32, hw: f32, hh: f32, r: f32) -> f32 {
+    let qx = (px - cx).abs() - hw + r;
+    let qy = (py - cy).abs() - hh + r;
+    let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+    outside + qx.max(qy).min(0.0) - r
+}
+
+/// Signed distance to a triangle, as the max of the distances to its
+/// three edge lines. Exact inside and along edges (all the
+/// anti-aliasing needs); slightly short outside the corners.
+fn sd_triangle(px: f32, py: f32, tri: &[(f32, f32); 3]) -> f32 {
+    let (cx, cy) = (
+        (tri[0].0 + tri[1].0 + tri[2].0) / 3.0,
+        (tri[0].1 + tri[1].1 + tri[2].1) / 3.0,
+    );
+    let mut d = f32::MIN;
+    for i in 0..3 {
+        let (ax, ay) = tri[i];
+        let (bx, by) = tri[(i + 1) % 3];
+        let (ex, ey) = (bx - ax, by - ay);
+        let len = (ex * ex + ey * ey).sqrt().max(1e-6);
+        // Normal pointing away from the centroid.
+        let (mut nx, mut ny) = (ey / len, -ex / len);
+        if (cx - ax) * nx + (cy - ay) * ny > 0.0 {
+            nx = -nx;
+            ny = -ny;
+        }
+        d = d.max((px - ax) * nx + (py - ay) * ny);
+    }
+    d
+}
+
+/// Render a callout body of `body_w` × `body_h` with an optional tail.
+/// Colors: vertical gradient derived from `fill` (lighter top, `fill`
+/// in the middle, slightly darker bottom), a 1px `border`, and a soft
+/// drop shadow underneath.
+fn build_callout_sprite(
+    body_w: i32,
+    body_h: i32,
+    g: CalloutGeom,
+    tail: Option<Tail>,
+    fill: COLORREF,
+    border: COLORREF,
+) -> Sprite {
+    let dir = tail.map(|t| t.dir);
+    let th = g.tail_h;
+    let margin = |d: TailDir| if dir == Some(d) { th } else { 0 };
+    let body_x = SHADOW_BLUR + margin(TailDir::Left);
+    let body_y = SHADOW_BLUR + margin(TailDir::Up);
+    let w = body_x + body_w + SHADOW_BLUR + margin(TailDir::Right);
+    let h = body_y + body_h + SHADOW_BLUR + SHADOW_OFFSET + margin(TailDir::Down);
+
+    let (bx, by, bw, bh) = (body_x as f32, body_y as f32, body_w as f32, body_h as f32);
+    let (hw, hh) = (bw / 2.0, bh / 2.0);
+    let (cx, cy) = (bx + hw, by + hh);
+    let r = g.radius as f32;
+    let half = g.tail_half_w as f32;
+    let thf = th as f32;
+    // Triangle in sprite space. The tip is at the pixel centre of the
+    // aimed-at column/row; the base sinks 2px into the body so the
+    // union has no seam.
+    let tri = tail.map(|t| {
+        let o = t.offset as f32 + 0.5;
+        match t.dir {
+            TailDir::Up => [
+                (bx + o, by - thf),
+                (bx + o - half, by + 2.0),
+                (bx + o + half, by + 2.0),
+            ],
+            TailDir::Down => [
+                (bx + o, by + bh + thf),
+                (bx + o - half, by + bh - 2.0),
+                (bx + o + half, by + bh - 2.0),
+            ],
+            TailDir::Left => [
+                (bx - thf, by + o),
+                (bx + 2.0, by + o - half),
+                (bx + 2.0, by + o + half),
+            ],
+            TailDir::Right => [
+                (bx + bw + thf, by + o),
+                (bx + bw - 2.0, by + o - half),
+                (bx + bw - 2.0, by + o + half),
+            ],
+        }
+    });
+
+    let white = COLORREF(0x00FF_FFFF);
+    let black = COLORREF(0);
+    let top = mix_bgr(fill, white, 0.6);
+    let mid = mix_bgr(fill, fill, 0.0);
+    let bottom = mix_bgr(fill, black, 0.1);
+    let border_c = mix_bgr(border, border, 0.0);
+
+    let n = (w * h) as usize;
+    let mut shape_a = vec![0f32; n];
+    let mut color = vec![[0f32; 3]; n];
+    for y in 0..h {
+        let py = y as f32 + 0.5;
+        let t = ((py - by) / bh).clamp(0.0, 1.0);
+        let fill_c: [f32; 3] = if t < 0.5 {
+            let k = t * 2.0;
+            [0, 1, 2].map(|i| top[i] + (mid[i] - top[i]) * k)
+        } else {
+            let k = (t - 0.5) * 2.0;
+            [0, 1, 2].map(|i| mid[i] + (bottom[i] - mid[i]) * k)
+        };
+        for x in 0..w {
+            let px = x as f32 + 0.5;
+            let mut d = sd_round_box(px, py, cx, cy, hw, hh, r);
+            if let Some(tri) = &tri {
+                d = d.min(sd_triangle(px, py, tri));
+            }
+            let a = (0.5 - d).clamp(0.0, 1.0);
+            if a <= 0.0 {
+                continue;
+            }
+            let core = (0.5 - (d + 1.0)).clamp(0.0, 1.0);
+            let i = (y * w + x) as usize;
+            shape_a[i] = a;
+            // Premultiplied: fill weighted by interior coverage, border
+            // by the 1px rim between interior and edge.
+            color[i] = [0, 1, 2].map(|c| fill_c[c] * core + border_c[c] * (a - core));
+        }
+    }
+
+    // Shadow: shape alpha shifted down, separable box blur.
+    let mut shadow = vec![0f32; n];
+    for y in SHADOW_OFFSET..h {
+        for x in 0..w {
+            shadow[(y * w + x) as usize] = shape_a[((y - SHADOW_OFFSET) * w + x) as usize];
+        }
+    }
+    let k = (2 * SHADOW_BLUR + 1) as f32;
+    let mut tmp = vec![0f32; n];
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = 0.0;
+            for dx in -SHADOW_BLUR..=SHADOW_BLUR {
+                let xx = x + dx;
+                if (0..w).contains(&xx) {
+                    sum += shadow[(y * w + xx) as usize];
+                }
+            }
+            tmp[(y * w + x) as usize] = sum / k;
+        }
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = 0.0;
+            for dy in -SHADOW_BLUR..=SHADOW_BLUR {
+                let yy = y + dy;
+                if (0..h).contains(&yy) {
+                    sum += tmp[(yy * w + x) as usize];
+                }
+            }
+            shadow[(y * w + x) as usize] = sum / k * SHADOW_ALPHA;
+        }
+    }
+
+    let mut px = vec![[0u8; 4]; n];
+    let mut spans = Vec::with_capacity(h as usize);
+    for y in 0..h {
+        let (mut first, mut last) = (w, 0);
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let a = shape_a[i];
+            // Shape over (black) shadow: the shadow adds alpha only.
+            let out_a = a + shadow[i] * (1.0 - a);
+            let alpha = (out_a * 255.0).round() as u8;
+            if alpha == 0 {
+                continue;
+            }
+            let [b, gch, rch] = color[i].map(|c| c.round().clamp(0.0, alpha as f32) as u8);
+            px[i] = [b, gch, rch, alpha];
+            first = first.min(x);
+            last = x + 1;
+        }
+        spans.push(if first < last { (first, last) } else { (0, 0) });
+    }
+
+    Sprite {
+        w,
+        h,
+        body_x,
+        body_y,
+        px,
+        spans,
+    }
+}
+
+/// Composite `sprite` into the DIB with its top-left at `(x0, y0)`.
+/// Opaque pixels are copied; partially transparent ones (anti-aliased
+/// edges, shadow) are blended over what's there, so a shadow never
+/// punches a hole in a neighbouring badge.
+unsafe fn blit_sprite(bits: *mut u8, dib_w: i32, dib_h: i32, sprite: &Sprite, x0: i32, y0: i32) {
+    if bits.is_null() {
+        return;
+    }
+    let stride = (dib_w as usize) * 4;
+    for sy in 0..sprite.h {
+        let y = y0 + sy;
+        if y < 0 || y >= dib_h {
+            continue;
+        }
+        let (s0, s1) = sprite.spans[sy as usize];
+        let start = s0.max(-x0);
+        let end = s1.min(dib_w - x0);
+        if start >= end {
+            continue;
+        }
+        let row = bits.add((y as usize) * stride);
+        let src_row = &sprite.px[(sy * sprite.w) as usize..((sy + 1) * sprite.w) as usize];
+        for sx in start..end {
+            let src = src_row[sx as usize];
+            let a = src[3];
+            if a == 0 {
+                continue;
+            }
+            let dst = row.add(((x0 + sx) as usize) * 4);
+            if a == 255 {
+                std::ptr::copy_nonoverlapping(src.as_ptr(), dst, 4);
+            } else {
+                let inv = 255 - a as u32;
+                for (c, &sc) in src.iter().enumerate() {
+                    let d = *dst.add(c) as u32;
+                    *dst.add(c) = (sc as u32 + (d * inv + 127) / 255) as u8;
+                }
+            }
+        }
+    }
+}
+
 /// Benchmark-only access to the overlay's private layout and drawing
 /// code. Compiled only with the `bench` cargo feature; not part of the
 /// public API. Everything here draws into an in-memory DIB — no HWND,
@@ -2052,6 +2675,13 @@ pub mod bench {
             }
         }
 
+        /// Raw premultiplied BGRA pixels, top-down.
+        pub fn pixels(&self) -> &[u8] {
+            unsafe {
+                std::slice::from_raw_parts(self.bits, (self.width * self.height * 4) as usize)
+            }
+        }
+
         /// The full-surface clear `render_to_dib` does every frame.
         pub fn clear(&mut self) {
             unsafe {
@@ -2097,6 +2727,30 @@ pub mod bench {
                 .max_by_key(|&(c, n)| (n, std::cmp::Reverse(c)))
                 .map(|(c, _)| c.to_string())
                 .unwrap_or_default()
+        }
+
+        /// How the hints were placed: `[below centred, above centred,
+        /// slid, side, no tail]`. Used to judge layout quality.
+        pub fn placement_mix(&self) -> [usize; 5] {
+            let mut mix = [0; 5];
+            for h in &self.0.laid {
+                let slot = match h.tail {
+                    None => 4,
+                    Some(t) => match t.dir {
+                        TailDir::Left | TailDir::Right => 3,
+                        _ if t.offset != (h.badge_rect.right - h.badge_rect.left) / 2 => 2,
+                        TailDir::Up => 0,
+                        TailDir::Down => 1,
+                    },
+                };
+                mix[slot] += 1;
+            }
+            mix
+        }
+
+        /// Number of distinct cached callout sprites.
+        pub fn sprite_count(&self) -> usize {
+            self.0.sprites.len()
         }
 
         /// Draw every visible hint (no clear, no DWM hand-off).
@@ -2182,8 +2836,13 @@ mod opacity_tests {
 mod layout_tests {
     use super::*;
 
+    /// Element preset pinned to the rectangular shape: these tests cover
+    /// the corner-anchor layout. Callout layout lives in `callout_tests`.
     fn element_style() -> HintStyle {
-        HintStyle::elements()
+        HintStyle {
+            shape: BadgeShape::Rect,
+            ..HintStyle::elements()
+        }
     }
 
     fn window_style() -> HintStyle {
@@ -2372,6 +3031,337 @@ mod layout_tests {
         assert_eq!(laid[0].target_rect.top, 50);
         assert_eq!(laid[0].target_rect.right, 110);
         assert_eq!(laid[0].target_rect.bottom, 90);
+    }
+}
+
+#[cfg(test)]
+mod callout_tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{SM_CXSCREEN, SM_CYSCREEN};
+
+    fn style() -> HintStyle {
+        HintStyle::elements()
+    }
+
+    fn hint(x: i32, y: i32, w: i32, h: i32, label: &str) -> Hint {
+        Hint {
+            bounds: Bounds {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+            label: label.to_string(),
+            extra: None,
+        }
+    }
+
+    fn body_w(r: &RECT) -> i32 {
+        r.right - r.left
+    }
+
+    /// Tip of a laid callout's tail, in client coords.
+    fn tip(h: &LaidHint) -> POINT {
+        let t = h.tail.expect("callout has a tail");
+        let g = style().callout_geom();
+        let b = &h.badge_rect;
+        match t.dir {
+            TailDir::Up => POINT {
+                x: b.left + t.offset,
+                y: b.top - g.tail_h,
+            },
+            TailDir::Down => POINT {
+                x: b.left + t.offset,
+                y: b.bottom + g.tail_h,
+            },
+            TailDir::Left => POINT {
+                x: b.left - g.tail_h,
+                y: b.top + t.offset,
+            },
+            TailDir::Right => POINT {
+                x: b.right + g.tail_h,
+                y: b.top + t.offset,
+            },
+        }
+    }
+
+    /// Body plus tail, as `lay_out` reserves it.
+    fn bbox(h: &LaidHint) -> RECT {
+        let g = style().callout_geom();
+        let mut r = h.badge_rect;
+        match h.tail.map(|t| t.dir) {
+            Some(TailDir::Up) => r.top -= g.tail_h,
+            Some(TailDir::Down) => r.bottom += g.tail_h,
+            Some(TailDir::Left) => r.left -= g.tail_h,
+            Some(TailDir::Right) => r.right += g.tail_h,
+            None => {}
+        }
+        r
+    }
+
+    fn assert_no_overlap(laid: &[LaidHint]) {
+        for (i, a) in laid.iter().enumerate() {
+            for b in &laid[i + 1..] {
+                assert!(
+                    !rects_intersect(&bbox(a), &bbox(b)),
+                    "callouts for {} and {} overlap",
+                    a.label,
+                    b.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn elements_default_to_callout_and_windows_to_rect() {
+        assert_eq!(HintStyle::elements().shape, BadgeShape::Callout);
+        assert_eq!(HintStyle::windows().shape, BadgeShape::Rect);
+    }
+
+    #[test]
+    fn config_shape_overrides_preset() {
+        let c = crate::config::BadgeColors {
+            shape: "rect".into(),
+            ..Default::default()
+        };
+        assert_eq!(HintStyle::elements_from_config(&c).shape, BadgeShape::Rect);
+        let c = crate::config::BadgeColors {
+            shape: "Callout".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            HintStyle::windows_from_config(&c).shape,
+            BadgeShape::Callout
+        );
+        let c = crate::config::BadgeColors {
+            shape: "hexagon".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            HintStyle::elements_from_config(&c).shape,
+            BadgeShape::Callout
+        );
+    }
+
+    #[test]
+    fn single_callout_sits_below_pointing_at_bottom_centre() {
+        let g = style().callout_geom();
+        let laid = lay_out(&[hint(400, 300, 60, 30, "a")], &style(), 0, 0);
+        let h = &laid[0];
+        let t = h.tail.expect("tail");
+        assert_eq!(t.dir, TailDir::Up);
+        assert_eq!(t.offset, body_w(&h.badge_rect) / 2, "centred");
+        assert_eq!(h.badge_rect.top, 330 + g.tail_h);
+        assert_eq!(tip(h), POINT { x: 430, y: 330 });
+    }
+
+    #[test]
+    fn callout_flips_above_at_monitor_bottom() {
+        let sh = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+        let g = style().callout_geom();
+        let laid = lay_out(&[hint(400, sh - 30, 60, 30, "a")], &style(), 0, 0);
+        let h = &laid[0];
+        assert_eq!(h.tail.map(|t| t.dir), Some(TailDir::Down));
+        assert_eq!(h.badge_rect.bottom, sh - 30 - g.tail_h);
+        assert_eq!(tip(h), POINT { x: 430, y: sh - 30 });
+    }
+
+    #[test]
+    fn callout_slides_at_monitor_left_edge_and_keeps_aim() {
+        // Centre x == inner: a centred body would cross x = 0, but
+        // sliding so the tip sits at the body's inner left edge fits.
+        let g = style().callout_geom();
+        let inner = g.inner();
+        let laid = lay_out(&[hint(0, 300, 2 * inner, 30, "a")], &style(), 0, 0);
+        let h = &laid[0];
+        let t = h.tail.expect("tail");
+        assert_eq!(t.dir, TailDir::Up);
+        assert_eq!(t.offset, inner);
+        assert_eq!(h.badge_rect.left, 0);
+        assert_eq!(tip(h), POINT { x: inner, y: 330 });
+    }
+
+    #[test]
+    fn crowded_row_keeps_every_tail_aimed_without_overlap() {
+        // Three buttons spaced so the first takes "below", the second
+        // "above", and the third collides with both centred spots but
+        // fits once slid sideways.
+        let g = style().callout_geom();
+        let glyph_w = ((style().font_height as f32) * 0.62) as i32;
+        let w = g.body_width(2 * glyph_w);
+        let d = (w / 2 + g.inner() + 1) / 2;
+        assert!(2 * d < w, "spacing must still collide when centred");
+        let hints: Vec<Hint> = (0..3)
+            .map(|i| hint(400 + i * d, 300, 16, 16, &format!("a{i}")))
+            .collect();
+        let laid = lay_out(&hints, &style(), 0, 0);
+        assert_no_overlap(&laid);
+        for (h, src) in laid.iter().zip(&hints) {
+            let p = tip(h);
+            let cx = src.bounds.x + src.bounds.width / 2;
+            match h.tail.unwrap().dir {
+                TailDir::Up => assert_eq!(p, POINT { x: cx, y: 316 }),
+                TailDir::Down => assert_eq!(p, POINT { x: cx, y: 300 }),
+                _ => {}
+            }
+        }
+        assert!(
+            laid.iter()
+                .any(|h| h.tail.unwrap().offset != body_w(&h.badge_rect) / 2),
+            "at least one callout had to slide"
+        );
+    }
+
+    #[test]
+    fn short_list_rows_fall_back_to_side_callouts() {
+        // Rows shorter than a callout: below/above run out after two
+        // rows, so the third row points sideways at its row.
+        let hints: Vec<Hint> = (0..3)
+            .map(|i| hint(300, 300 + i * 10, 200, 10, &format!("{i}")))
+            .collect();
+        let laid = lay_out(&hints, &style(), 0, 0);
+        assert_no_overlap(&laid);
+        let dirs: Vec<_> = laid.iter().map(|h| h.tail.map(|t| t.dir)).collect();
+        assert_eq!(dirs[0], Some(TailDir::Up));
+        assert_eq!(dirs[1], Some(TailDir::Down));
+        assert!(matches!(
+            dirs[2],
+            Some(TailDir::Left) | Some(TailDir::Right)
+        ));
+        let p = tip(&laid[2]);
+        assert_eq!(p.y, 325, "aims at the row's vertical centre");
+        assert!(p.x == 300 || p.x == 500, "tip on the row's near edge");
+    }
+
+    #[test]
+    fn hints_with_extra_text_keep_rect_layout() {
+        let mut h = hint(400, 300, 60, 30, "a");
+        h.extra = Some("title".into());
+        let laid = lay_out(&[h], &style(), 0, 0);
+        assert!(laid[0].tail.is_none());
+        assert!(laid[0].extra_rect.is_some());
+    }
+
+    #[test]
+    fn layout_works_on_any_primary_monitor_size() {
+        // Smoke test: a scattered grid lays out with no overlaps.
+        let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+        let hints: Vec<Hint> = (0..60)
+            .map(|i| {
+                hint(
+                    (i % 10) * (sw / 10),
+                    100 + (i / 10) * 40,
+                    30,
+                    20,
+                    &format!("{i}"),
+                )
+            })
+            .collect();
+        let laid = lay_out(&hints, &style(), 0, 0);
+        let tailed: Vec<LaidHint> = laid.into_iter().filter(|h| h.tail.is_some()).collect();
+        assert_no_overlap(&tailed);
+    }
+
+    fn sprite(tail: Option<Tail>) -> Sprite {
+        let g = style().callout_geom();
+        build_callout_sprite(
+            24,
+            g.body_h,
+            g,
+            tail,
+            COLORREF(0x0000E5FF),
+            COLORREF(0x00202020),
+        )
+    }
+
+    fn pixel(s: &Sprite, x: i32, y: i32) -> [u8; 4] {
+        s.px[(y * s.w + x) as usize]
+    }
+
+    #[test]
+    fn sprite_is_opaque_inside_and_clear_outside() {
+        let g = style().callout_geom();
+        let s = sprite(Some(Tail {
+            dir: TailDir::Up,
+            offset: 12,
+        }));
+        assert_eq!(pixel(&s, s.body_x + 12, s.body_y + g.body_h / 2)[3], 255);
+        assert_eq!(pixel(&s, 0, 0)[3], 0, "margin corner is transparent");
+        assert!(
+            pixel(&s, s.body_x, s.body_y)[3] < 128,
+            "rounded corner is cut away"
+        );
+        assert!(
+            pixel(&s, s.body_x + 12, s.body_y - g.tail_h)[3] > 0,
+            "tail reaches its tip"
+        );
+        assert_eq!(
+            pixel(&s, s.body_x + 2, s.body_y - g.tail_h)[3],
+            0,
+            "tail is narrow at the tip"
+        );
+    }
+
+    #[test]
+    fn sprite_pixels_are_premultiplied_and_spans_cover_them() {
+        for dir in [TailDir::Up, TailDir::Down, TailDir::Left, TailDir::Right] {
+            let s = sprite(Some(Tail { dir, offset: 9 }));
+            for y in 0..s.h {
+                let (a, b) = s.spans[y as usize];
+                for x in 0..s.w {
+                    let p = pixel(&s, x, y);
+                    assert!(
+                        p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3],
+                        "{dir:?} ({x},{y})"
+                    );
+                    if p[3] > 0 {
+                        assert!(a <= x && x < b, "{dir:?} span misses ({x},{y})");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sprite_has_soft_shadow_below_body() {
+        let g = style().callout_geom();
+        let s = sprite(None);
+        let below = pixel(&s, s.body_x + 12, s.body_y + g.body_h + 1);
+        assert!(
+            below[3] > 0 && below[3] < 80,
+            "faint shadow, got {}",
+            below[3]
+        );
+        assert_eq!(&below[..3], &[0, 0, 0], "shadow is black");
+    }
+
+    #[test]
+    fn blit_blends_edges_over_existing_pixels() {
+        let s = sprite(None);
+        let (w, h) = (s.w + 4, s.h + 4);
+        // Opaque blue background.
+        let mut buf: Vec<u8> = [255u8, 0, 0, 255].repeat((w * h) as usize);
+        unsafe { blit_sprite(buf.as_mut_ptr(), w, h, &s, 2, 2) };
+        for p in buf.chunks(4) {
+            assert_eq!(p[3], 255, "stays opaque over an opaque background");
+            assert!(p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]);
+        }
+        // Body centre is the sprite's yellow (B=0, R=255 for #FFE500),
+        // not the blue background.
+        let mid_row = 2 + s.body_y + style().callout_geom().body_h / 2;
+        let i = ((mid_row * w + 2 + s.body_x + 12) * 4) as usize;
+        assert!(buf[i] < 20, "blue channel, got {}", buf[i]);
+        assert!(buf[i + 2] > 200, "red channel");
+    }
+
+    #[test]
+    fn blit_clips_at_buffer_edges() {
+        let s = sprite(None);
+        let mut buf = vec![0u8; 10 * 10 * 4];
+        unsafe {
+            blit_sprite(buf.as_mut_ptr(), 10, 10, &s, -5, -5);
+            blit_sprite(buf.as_mut_ptr(), 10, 10, &s, 8, 8);
+        }
     }
 }
 

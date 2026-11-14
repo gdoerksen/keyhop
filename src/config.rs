@@ -233,6 +233,10 @@ pub struct BadgeColors {
     /// control. The Settings UI pre-fills the DPI-suggested value so
     /// users on high-DPI screens see a sensible starting point.
     pub font_size: u8,
+    /// Badge shape: `"rect"` (corner badge) or `"callout"` (rounded
+    /// label below the element with a tail pointing at it). Empty string
+    /// → preset default (callout for elements, rect for windows).
+    pub shape: String,
 }
 
 /// Windows startup integration.

@@ -166,6 +166,13 @@ const ID_HINT_ORDER: usize = 1024;
 const ID_KEYBOARD_LAYOUT: usize = 1025;
 const ID_KEYBOARD_GEOMETRY: usize = 1026;
 const ID_CONSECUTIVE_KEYS: usize = 1027;
+const ID_BADGE_SHAPE: usize = 1028;
+
+/// Element badge shape choices, in combo order: (config value, label).
+const BADGE_SHAPE_OPTIONS: [(overlay::BadgeShape, &str); 2] = [
+    (overlay::BadgeShape::Callout, "Callout (points at target)"),
+    (overlay::BadgeShape::Rect, "Corner rectangle"),
+];
 
 // Numeric labels mirroring trackbar / spinner positions live in
 // the 1100+ range so we can update them on slider drag without an
@@ -268,6 +275,7 @@ struct State {
     element_opacity: HWND,
     window_opacity: HWND,
     show_leader: HWND,
+    badge_shape: HWND,
     scope_mode: HWND,
     max_elements: HWND,
     enable_caching: HWND,
@@ -280,6 +288,12 @@ struct State {
     /// `None` (preset default) — we only persist an explicit override
     /// when the user actually toggled the checkbox.
     initial_show_leader: Option<bool>,
+    /// Element and window `shape` strings at dialog open. The element
+    /// value is kept verbatim (often `""` = preset default) unless the
+    /// user changes the combo; the window value has no UI and is always
+    /// written back unchanged.
+    initial_element_shape: String,
+    initial_window_shape: String,
     /// `Some(_)` once the user clicks Save (or Reset to Defaults) and
     /// the resulting [`Config`] has been written to disk. Surfaced to
     /// [`show`] so the caller can hot-apply without re-reading the file.
@@ -448,6 +462,7 @@ mod tips {
         "Element badge transparency.\n\n0 = use the preset default (90%).\n100 = fully opaque.";
     pub const WINDOW_OPACITY: &str =
         "Window badge transparency.\n\n0 = use the preset default (90%).\n100 = fully opaque.";
+    pub const BADGE_SHAPE: &str = "Callout: a rounded label just below each element with a small tail pointing at it (flips above or beside it when crowded).\n\nCorner rectangle: the classic badge in the element's top-left corner.";
     pub const SHOW_LEADER: &str = "Draw a thin colored arrow from each badge to its target element. Useful when badges are stacked or far from their target.";
     pub const CONSECUTIVE_KEYS: &str = "Which key pairs two- and three-key labels may contain. Pressing the same key twice, or two keys with the same finger, means lifting and re-striking one finger, which is slower than alternating.\n\n• No repeats or same finger: never `ll` or `fg`. Fingers follow the Keyboard section.\n• No repeated keys: never `ll`.\n• Allow any keys: the original labels (a few more short labels on busy screens).";
     pub const KEYBOARD_LAYOUT: &str = "Which keyboard layout hint keys are chosen for.\n\n• Auto — follow the active Windows layout (works with any installed layout).\n• A named layout — use this when your keyboard remaps keys in its firmware while Windows stays on QWERTY.";
@@ -899,6 +914,25 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
     add_tip(tooltip, hwnd, window_font_size, tips::WINDOW_FONT_SIZE);
     y += ROW_H;
 
+    create_label(hwnd, hinstance, "Element badge shape:", RIGHT_LABEL_X, y);
+    let initial_shape = overlay::BadgeShape::from_config(&initial.colors.element.shape)
+        .unwrap_or(overlay::HintStyle::elements().shape);
+    let badge_shape = create_combo(
+        hwnd,
+        hinstance,
+        BADGE_SHAPE_OPTIONS.iter().map(|(_, label)| *label),
+        BADGE_SHAPE_OPTIONS
+            .iter()
+            .position(|(shape, _)| *shape == initial_shape)
+            .unwrap_or(0),
+        ID_BADGE_SHAPE,
+        RIGHT_FIELD_X,
+        y,
+        RIGHT_FIELD_W,
+    );
+    add_tip(tooltip, hwnd, badge_shape, tips::BADGE_SHAPE);
+    y += ROW_H;
+
     let initial_show_leader = initial
         .colors
         .element
@@ -1065,6 +1099,7 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         element_opacity,
         window_opacity,
         show_leader,
+        badge_shape,
         scope_mode,
         max_elements,
         enable_caching,
@@ -1073,6 +1108,8 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         window_font_size,
         launch_startup,
         initial_show_leader,
+        initial_element_shape: initial.colors.element.shape.clone(),
+        initial_window_shape: initial.colors.window.shape.clone(),
         saved_config: None,
     });
     STATE.with(|s| *s.borrow_mut() = Some(state));
@@ -1829,6 +1866,22 @@ fn collect_config() -> Option<(Config, bool)> {
         } else {
             Some(show_leader_checked)
         };
+        // Same idea for the shape: an untouched combo keeps whatever the
+        // file had (usually "" = preset default).
+        let chosen_shape = BADGE_SHAPE_OPTIONS
+            .get(unsafe { combo_selection(st.badge_shape) })
+            .map(|(shape, _)| *shape)
+            .unwrap_or(overlay::BadgeShape::Callout);
+        let initial_shape = overlay::BadgeShape::from_config(&st.initial_element_shape)
+            .unwrap_or(overlay::HintStyle::elements().shape);
+        let element_shape = if chosen_shape == initial_shape {
+            st.initial_element_shape.clone()
+        } else {
+            match chosen_shape {
+                overlay::BadgeShape::Callout => "callout".to_string(),
+                overlay::BadgeShape::Rect => "rect".to_string(),
+            }
+        };
         let element_font_size = unsafe { spinner_value(st.element_font_size) }.clamp(6, 120) as u8;
         let window_font_size = unsafe { spinner_value(st.window_font_size) }.clamp(10, 120) as u8;
         let launch_startup = unsafe { is_checked(st.launch_startup) };
@@ -1883,6 +1936,7 @@ fn collect_config() -> Option<(Config, bool)> {
                     show_leader,
                     leader_color: String::new(),
                     font_size: element_font_size,
+                    shape: element_shape,
                 },
                 window: BadgeColors {
                     badge_bg: window_bg,
@@ -1892,6 +1946,7 @@ fn collect_config() -> Option<(Config, bool)> {
                     show_leader,
                     leader_color: String::new(),
                     font_size: window_font_size,
+                    shape: st.initial_window_shape.clone(),
                 },
             },
             startup: StartupConfig {
