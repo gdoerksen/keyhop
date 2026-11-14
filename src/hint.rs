@@ -12,16 +12,19 @@
 //!   matched. This is the lowest-keystroke strategy and matches what
 //!   Vimium / surfingkeys do.
 //!
-//! The default alphabet is the home row (`asdfghjkl`) so the most common
-//! single-character hints stay under the resting position of the typing
-//! hand.
+//! The default alphabet is the home row, strongest finger first
+//! (`fjdkslagh`), so the most common single-character hints stay under
+//! the index and middle fingers. Alphabet order is a preference list:
+//! earlier characters get the shorter hints.
 
 use serde::{Deserialize, Serialize};
 
 use crate::keyboard::Finger;
 
-/// Default home-row alphabet, ordered by typing comfort for QWERTY layouts.
-pub const DEFAULT_ALPHABET: &str = "asdfghjkl";
+/// Default home-row alphabet for QWERTY, in finger-comfort order. Must
+/// equal what `alphabet_presets::build_alphabet` produces for the default
+/// config (a test enforces it).
+pub const DEFAULT_ALPHABET: &str = "fjdkslagh";
 
 /// Which hint-allocation strategy [`HintEngine::generate`] uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -89,6 +92,14 @@ impl HintEngine {
     /// the alphabet are preserved as-is; callers are responsible for
     /// deduping if desired.
     ///
+    /// **Order matters:** the alphabet is read as a preference list, best
+    /// key first (built-in presets are sorted this way by
+    /// [`crate::keyboard::comfort_order`]). Single-key hints and second
+    /// keys follow it. Without a key rule, prefixes of longer hints come
+    /// from the back. With one (see [`Self::with_key_rule`]), prefixes
+    /// are the strongest-finger keys among those that keep nearly full
+    /// capacity (see `prefix_rank`): `d` then `k` on the QWERTY home row.
+    ///
     /// # Panics
     ///
     /// Panics if `alphabet` is empty.
@@ -142,9 +153,10 @@ impl HintEngine {
     /// (math-optimal Vimium allocation).
     ///
     /// When set to `m > 0` and `count > alphabet.len()`, the allocator
-    /// forces `min(m, n − 1, count)` length-1 hints from the start of
-    /// the alphabet, then runs the Vimium allocator over the remaining
-    /// `n − m` prefix slots for the rest of the count. Trades a small
+    /// forces at least `min(m, n − 1, count)` length-1 hints, then spreads
+    /// the rest of the count over the remaining prefix keys. Without a
+    /// key rule the singles are the start of the alphabet; with one they
+    /// are every key not picked as a prefix (see [`Self::new`]). Trades a small
     /// average-typing penalty for guaranteed one-key reach on the
     /// first `m` elements (which are usually the most likely targets,
     /// since the element picker sorts elements nearest the configured
@@ -457,9 +469,10 @@ impl HintEngine {
             .min_singles
             .max(vimium_natural_short_count_at_length_one(count, n)));
         let total_len = |labels: &[String]| labels.iter().map(|l| l.chars().count()).sum::<usize>();
+        let rank = self.prefix_rank(succ);
         let mut best: Option<(usize, Vec<String>)> = None;
         for forced in floor..=ceiling {
-            let Some(labels) = self.constrained_with_singles(count, succ, forced) else {
+            let Some(labels) = self.constrained_with_singles(count, succ, &rank, forced) else {
                 continue;
             };
             let cost = total_len(&labels);
@@ -471,21 +484,39 @@ impl HintEngine {
     }
 
     /// One constrained allocation with exactly `forced` single-key labels.
+    /// `rank` is [`Self::prefix_rank`] for `succ`.
     fn constrained_with_singles(
         &self,
         count: usize,
         succ: &[Vec<usize>],
+        rank: &[usize],
         forced: usize,
     ) -> Option<Vec<String>> {
         let n = self.alphabet.len();
         let remaining = count - forced;
 
-        let mut out: Vec<String> = (0..forced).map(|i| self.encode(i, 1)).collect();
+        // Split the alphabet: the top `n - forced` keys of `rank` lead
+        // multi-key labels, every other key is a single, best first.
+        let (roots, mut out): (Vec<Vec<usize>>, Vec<String>) = if forced == 0 {
+            ((0..n).map(|i| vec![i]).collect(), Vec::new())
+        } else {
+            let prefixes = &rank[..n - forced];
+            let mut is_prefix = vec![false; n];
+            for &i in prefixes {
+                is_prefix[i] = true;
+            }
+            (
+                prefixes.iter().map(|&i| vec![i]).collect(),
+                (0..n)
+                    .filter(|&i| !is_prefix[i])
+                    .map(|i| self.alphabet[i].to_string())
+                    .collect(),
+            )
+        };
 
         // `prev` = level L-1, `cur` = level L. With forced singles the
         // length-1 prefixes aren't labels themselves, so we start at L=2
         // and never demote back to length 1.
-        let roots: Vec<Vec<usize>> = (forced..n).map(|i| vec![i]).collect();
         let (mut prev, mut cur) = if forced == 0 {
             (Vec::new(), roots)
         } else {
@@ -566,7 +597,56 @@ impl HintEngine {
         }
         chars.into_iter().collect()
     }
+
+    /// Alphabet indices ordered by how good each key is as the first key
+    /// of a multi-key label. Finger strength decides, among keys that keep
+    /// nearly full capacity:
+    ///
+    /// 1. **Near-best keys** — more than [`PREFIX_CAPACITY_PERCENT`] of the
+    ///    best key's allowed second keys — come first, strongest finger
+    ///    first (index, middle, ring, pinky; unknown fingers last), then
+    ///    alphabet (comfort) order. Capacity differences inside the cutoff
+    ///    are treated as negligible, so a home-row key beats a top-row key
+    ///    on the same finger.
+    /// 2. The rest follow, most second keys first, then alphabet order.
+    ///
+    /// QWERTY home row, same-finger rule: `f` / `j` allow 7 second keys
+    /// against the best 8 (they can't be followed by `g` / `h`), so they
+    /// drop out and the middle fingers lead: `d k s l a f j g h`. For
+    /// `a-z` the right pinky's `p` allows the most (25), but the middle
+    /// fingers' keys (23–24) are close enough, so they lead in comfort
+    /// order instead: `d k e i c`. With the extended home row (`; '`) the
+    /// middle fingers allow 10 and `f` / `j` 9 — exactly 90%, not above
+    /// it — so the middle fingers still lead there.
+    fn prefix_rank(&self, succ: &[Vec<usize>]) -> Vec<usize> {
+        let best = succ.iter().map(Vec::len).max().unwrap_or(0);
+        let tier = |i: usize| {
+            self.fingers
+                .get(i)
+                .and_then(|fs| fs.iter().map(|f| f.tier()).min())
+                .unwrap_or(u8::MAX)
+        };
+        let mut rank: Vec<usize> = (0..succ.len()).collect();
+        rank.sort_by_cached_key(|&i| {
+            let near_best = succ[i].len() * 100 > best * PREFIX_CAPACITY_PERCENT;
+            if near_best {
+                (false, tier(i), 0, i)
+            } else {
+                (true, 0, best - succ[i].len(), i)
+            }
+        });
+        rank
+    }
 }
+
+/// A key must keep *more than* this percentage of the best key's allowed
+/// second keys to count as a full-capacity prefix in
+/// [`HintEngine::prefix_rank`]. Among such keys finger strength decides;
+/// otherwise capacity does. Strict, so losing a tenth or more disqualifies
+/// a key: `f` / `j` lose one of eight on the home row and one of ten on
+/// the extended home row (both measurably costlier as prefixes), while the
+/// a-z middle-finger keys lose one or two of 25 (no measurable cost).
+const PREFIX_CAPACITY_PERCENT: usize = 90;
 
 /// All one-character extensions of `path` allowed by `succ`.
 fn children<'a>(
@@ -667,7 +747,7 @@ mod tests {
 
     fn default_app_engine() -> HintEngine {
         HintEngine::new(DEFAULT_ALPHABET)
-            .with_min_singles(8)
+            .with_min_singles(7)
             .with_key_rule(
                 ConsecutiveKeys::NoSameFinger,
                 fingers_for(DEFAULT_ALPHABET, &Layout::qwerty(), Geometry::Staggered),
@@ -708,7 +788,9 @@ mod tests {
         for count in [10, 17, 50, 100, 300] {
             let labels = e.generate(count);
             let singles = labels.iter().filter(|l| l.len() == 1).count();
-            assert_eq!(singles, 8, "count={count}");
+            // One prefix key ('d') while it suffices, two ('d', 'k') after.
+            let expected = if count <= 16 { 8 } else { 7 };
+            assert_eq!(singles, expected, "count={count}");
             let mut lens: Vec<usize> = labels
                 .iter()
                 .filter(|l| l.len() > 1)
@@ -731,14 +813,25 @@ mod tests {
 
     #[test]
     fn no_same_finger_default_examples() {
-        // 8 singles a..k; 'l' (right ring) can't be followed by 'l', and
-        // nothing else on the home row shares its finger.
+        // Prefixes are the keys with the most allowed second keys: 'd' and
+        // 'k' (middle fingers) clash with nothing else on the home row,
+        // while 'f'/'j' can't be followed by 'g'/'h'. Up to 16 targets one
+        // prefix suffices, so 'k' stays a single.
         let labels = default_app_engine().generate(16);
         assert_eq!(
             labels,
             vec![
-                "a", "s", "d", "f", "g", "h", "j", "k", "la", "ls", "ld", "lf", "lg", "lh", "lj",
-                "lk"
+                "f", "j", "k", "s", "l", "a", "g", "h", "df", "dj", "dk", "ds", "dl", "da", "dg",
+                "dh"
+            ]
+        );
+        // One more target and 'k' becomes the second prefix.
+        let labels = default_app_engine().generate(17);
+        assert_eq!(
+            labels,
+            vec![
+                "f", "j", "s", "l", "a", "g", "h", "df", "dj", "dk", "ds", "dl", "da", "dg", "dh",
+                "kf", "kj"
             ]
         );
         assert!(!default_app_engine()
@@ -748,7 +841,7 @@ mod tests {
                 || l.contains("gf")
                 || l.contains("hj")
                 || l.contains("jh")
-                || l.contains("ll")));
+                || l.contains("hh")));
     }
 
     #[test]
@@ -757,6 +850,79 @@ mod tests {
         let labels = e.generate(80);
         assert_valid(&labels, 80, |a, b| a != b);
         assert!(labels.iter().any(|l| l.contains("fg")));
+    }
+
+    fn prefixes_of(labels: &[String]) -> Vec<char> {
+        let mut out: Vec<char> = Vec::new();
+        for l in labels.iter().filter(|l| l.chars().count() > 1) {
+            let c = l.chars().next().unwrap();
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn prefix_rank_home_row_prefers_middle_fingers() {
+        let e = default_app_engine();
+        let rank: String = e
+            .prefix_rank(&e.succ_tables[0])
+            .into_iter()
+            .map(|i| e.alphabet[i])
+            .collect();
+        assert_eq!(rank, "dkslafjgh");
+    }
+
+    #[test]
+    fn prefix_finger_strength_beats_small_capacity_gain() {
+        // Under the same-finger rule 'p' (right pinky) allows 25 second
+        // keys, the middle fingers' keys 23-24: close enough that they
+        // lead, in comfort order (home-row 'd' before top-row 'i').
+        let az = "fjdkslaghrueiwoqptyvmcxzbn";
+        let e = HintEngine::new(az).with_min_singles(7).with_key_rule(
+            ConsecutiveKeys::NoSameFinger,
+            fingers_for(az, &Layout::qwerty(), Geometry::Staggered),
+        );
+        let rank: String = e
+            .prefix_rank(&e.succ_tables[0])
+            .into_iter()
+            .take(5)
+            .map(|i| e.alphabet[i])
+            .collect();
+        assert_eq!(rank, "dkeic");
+        assert_eq!(prefixes_of(&e.generate(30)), vec!['d']);
+        let labels = e.generate(60);
+        assert_eq!(prefixes_of(&labels)[..2], ['d', 'k']);
+        assert!(!prefixes_of(&labels).contains(&'p'));
+    }
+
+    #[test]
+    fn extended_home_row_keeps_middle_finger_prefixes() {
+        // 11 keys: middle fingers allow 10 second keys, 'f' / 'j' 9 (they
+        // lose 'g' / 'h'). Exactly 90% doesn't qualify, so the index keys
+        // (and the 'g' / 'h' stretches) don't lead.
+        let alphabet = "fjdksla;gh'";
+        let e = HintEngine::new(alphabet).with_min_singles(7).with_key_rule(
+            ConsecutiveKeys::NoSameFinger,
+            fingers_for(alphabet, &Layout::qwerty(), Geometry::Staggered),
+        );
+        assert_eq!(prefixes_of(&e.generate(40)), vec!['d', 'k', 's', 'l']);
+    }
+
+    #[test]
+    fn prefix_with_equal_capacity_goes_to_strongest_finger() {
+        // No-repeat: every key allows 8 second keys, so the strongest
+        // finger's 'f' leads and 'j' becomes the first single.
+        let e = HintEngine::new(DEFAULT_ALPHABET)
+            .with_min_singles(8)
+            .with_key_rule(
+                ConsecutiveKeys::NoRepeat,
+                fingers_for(DEFAULT_ALPHABET, &Layout::qwerty(), Geometry::Staggered),
+            );
+        let labels = e.generate(12);
+        assert_eq!(labels[0], "j");
+        assert_eq!(prefixes_of(&labels), vec!['f']);
     }
 
     #[test]
@@ -768,7 +934,7 @@ mod tests {
         for count in [5, 10, 17, 50, 300] {
             assert_eq!(legacy.generate(count), allow.generate(count));
         }
-        assert!(legacy.generate(17).contains(&"ll".to_string()));
+        assert!(legacy.generate(17).contains(&"hh".to_string()));
     }
 
     #[test]
@@ -897,7 +1063,7 @@ mod tests {
     fn shortest_first_uses_single_chars_when_possible() {
         let e = HintEngine::new(DEFAULT_ALPHABET);
         let labels = e.generate(5);
-        assert_eq!(labels, vec!["a", "s", "d", "f", "g"]);
+        assert_eq!(labels, vec!["f", "j", "d", "k", "s"]);
         assert!(labels.iter().all(|l| l.len() == 1));
     }
 
@@ -1055,10 +1221,10 @@ mod tests {
         // Exactly 4 length-1 labels, taken from the start of alphabet.
         let singles: Vec<&String> = labels.iter().filter(|l| l.len() == 1).collect();
         assert_eq!(singles.len(), 4);
-        assert_eq!(singles[0], "a");
-        assert_eq!(singles[1], "s");
+        assert_eq!(singles[0], "f");
+        assert_eq!(singles[1], "j");
         assert_eq!(singles[2], "d");
-        assert_eq!(singles[3], "f");
+        assert_eq!(singles[3], "k");
     }
 
     #[test]
@@ -1101,7 +1267,7 @@ mod tests {
         // a no-op (and we don't emit *more* singles than `count`).
         let e = HintEngine::new(DEFAULT_ALPHABET).with_min_singles(7);
         let labels = e.generate(3);
-        assert_eq!(labels, vec!["a", "s", "d"]);
+        assert_eq!(labels, vec!["f", "j", "d"]);
     }
 
     #[test]

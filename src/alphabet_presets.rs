@@ -13,16 +13,22 @@
 //!   surprises for users who script `config.toml` by hand.
 //! - **Idempotent**: applying a preset is a pure function — no global
 //!   state, easy to unit-test.
-//! - **Stable order**: the alphabet's character order matters because
-//!   [`crate::HintEngine`] hands out single-letter hints in alphabet
-//!   order. Home-row characters always come first so the first nine
-//!   hints stay under the user's resting fingers.
+//! - **Comfort order**: [`crate::HintEngine`] treats alphabet order as
+//!   preference — single-key hints and second keys come from the front
+//!   (prefixes are chosen by finger strength and capacity; see
+//!   [`crate::HintEngine::new`]). Presets are therefore plain *sets* of
+//!   keys (`asdfghjkl`, `a-z`), and every built-in alphabet is sorted by
+//!   [`comfort_order`]: strongest finger first (index, middle, ring,
+//!   pinky, then sideways stretches), home row before the top, bottom
+//!   and number rows. On QWERTY the home row comes out `fjdkslagh`.
+//!   The ordering lives in one place, so it follows the layout and the
+//!   board geometry automatically.
 //! - **No silent dedupe**: if the user types `aa` into "custom
 //!   additions" they probably want one `a`, not a panic. We dedupe
 //!   while preserving first-occurrence order.
 
 use crate::config::{AlphabetPreset, HintConfig};
-use crate::keyboard::{translate_charset, translate_positional, Layout};
+use crate::keyboard::{comfort_order, translate_charset, translate_positional, Geometry, Layout};
 
 /// Characters we never want to ship in the same alphabet because they
 /// look near-identical in the overlay font and the user can't tell
@@ -38,10 +44,9 @@ use crate::keyboard::{translate_charset, translate_positional, Layout};
 /// alphabet from 9 chars to 8.
 pub const AMBIGUOUS_CHARS: &[char] = &['O', '0'];
 
-/// Home-row characters in QWERTY typing-comfort order. Used as the
-/// base of [`AlphabetPreset::HomeRow`] and prefixed onto every
-/// non-`Custom` preset so the most common single-letter hints stay
-/// under the user's resting fingers.
+/// The nine home-row keys (QWERTY positions, written left to right).
+/// Base of [`AlphabetPreset::HomeRow`]; the builder reorders it by
+/// finger comfort (`fjdkslagh` on QWERTY).
 pub const HOME_ROW: &str = "asdfghjkl";
 
 /// Right-pinky extension keys appended for [`AlphabetPreset::HomeRowExtended`].
@@ -54,12 +59,13 @@ pub const NUMBERS: &str = "0123456789";
 pub const LOWERCASE_ALPHA: &str = "abcdefghijklmnopqrstuvwxyz";
 
 /// Build the final alphabet string from a [`HintConfig`], assuming a
-/// QWERTY layout. See [`build_alphabet_for`].
+/// QWERTY layout on a standard staggered board. See [`build_alphabet_for`].
 pub fn build_alphabet(cfg: &HintConfig) -> String {
-    build_alphabet_for(cfg, &Layout::qwerty())
+    build_alphabet_for(cfg, &Layout::qwerty(), Geometry::Staggered)
 }
 
-/// Build the final alphabet string from a [`HintConfig`] for `layout`.
+/// Build the final alphabet string from a [`HintConfig`] for `layout`
+/// typed on a `geometry` board.
 ///
 /// Resolution order:
 /// 1. Pick the base set from `cfg.preset`. For [`AlphabetPreset::Custom`]
@@ -73,16 +79,19 @@ pub fn build_alphabet(cfg: &HintConfig) -> String {
 ///    Character sets (`a-z`) keep every character the layout can type and
 ///    replace the rest with the layout's character on the same key (see
 ///    [`translate_charset`]).
-/// 4. Append `cfg.custom_additions` verbatim so users can plug in extra
-///    keys (national characters, etc.) without giving up the preset.
-/// 5. If `cfg.exclude_ambiguous` is on, strip [`AMBIGUOUS_CHARS`].
-/// 6. Always dedupe while preserving first-occurrence order so the
+/// 4. Sort everything so far by [`comfort_order`] for `layout` and
+///    `geometry`, so the easiest keys get the single-key hints.
+/// 5. Append `cfg.custom_additions` verbatim, in the order typed, so users
+///    can plug in extra keys (national characters, etc.) without giving
+///    up the preset.
+/// 6. If `cfg.exclude_ambiguous` is on, strip [`AMBIGUOUS_CHARS`].
+/// 7. Always dedupe while preserving first-occurrence order so the
 ///    alphabet doesn't quietly waste hint slots on duplicates.
 ///
 /// Returns at minimum the home-row default if every step somehow
 /// produced an empty string — [`crate::HintEngine`] panics on an empty
 /// alphabet and we'd rather fall back than crash.
-pub fn build_alphabet_for(cfg: &HintConfig, layout: &Layout) -> String {
+pub fn build_alphabet_for(cfg: &HintConfig, layout: &Layout, geometry: Geometry) -> String {
     if matches!(cfg.preset, AlphabetPreset::Custom) {
         // Custom mode bypasses the modifier flags entirely.
         let result = dedupe_preserve_order(&cfg.alphabet);
@@ -107,6 +116,7 @@ pub fn build_alphabet_for(cfg: &HintConfig, layout: &Layout) -> String {
     if cfg.include_extended && !matches!(cfg.preset, AlphabetPreset::HomeRowExtended) {
         buf.push_str(&translate_positional(HOME_ROW_EXT, layout));
     }
+    let mut buf = comfort_order(&buf, layout, geometry);
     if !cfg.custom_additions.is_empty() {
         buf.push_str(&cfg.custom_additions);
     }
@@ -154,8 +164,7 @@ impl HintConfig {
 
 /// Remove duplicate characters while preserving the first occurrence's
 /// position. Important: HintEngine assigns single-letter hints in
-/// alphabet order, so reordering here would visibly change which
-/// element gets which hint.
+/// alphabet order, so reordering here would undo [`comfort_order`].
 fn dedupe_preserve_order(s: &str) -> String {
     let mut seen = std::collections::HashSet::new();
     let mut out = String::with_capacity(s.len());
@@ -228,7 +237,85 @@ mod tests {
     #[test]
     fn default_config_yields_home_row() {
         let alphabet = build_alphabet(&cfg());
-        assert_eq!(alphabet, "asdfghjkl");
+        assert_eq!(alphabet, "fjdkslagh");
+    }
+
+    #[test]
+    fn default_alphabet_constant_matches_default_config() {
+        assert_eq!(build_alphabet(&cfg()), crate::hint::DEFAULT_ALPHABET);
+    }
+
+    #[test]
+    fn lowercase_alpha_is_finger_ordered_on_qwerty() {
+        let mut c = cfg();
+        c.preset = AlphabetPreset::LowercaseAlpha;
+        assert_eq!(build_alphabet(&c), "fjdkslaghrueiwoqptyvmcxzbn");
+    }
+
+    #[test]
+    fn alphanumeric_puts_ordered_digits_after_letters() {
+        let mut c = cfg();
+        c.preset = AlphabetPreset::Alphanumeric;
+        // '0' is stripped by the default ambiguous filter.
+        assert_eq!(build_alphabet(&c), "fjdkslaghrueiwoqptyvmcxzbn473829156");
+    }
+
+    #[test]
+    fn lowercase_alpha_on_dvorak_is_all_letters_in_dvorak_order() {
+        let mut c = cfg();
+        c.preset = AlphabetPreset::LowercaseAlpha;
+        let alphabet = build_alphabet_for(&c, &Layout::dvorak(), Geometry::Staggered);
+        assert!(alphabet.starts_with("uhetonasid"), "{alphabet}");
+        let mut chars: Vec<char> = alphabet.chars().collect();
+        chars.sort_unstable();
+        assert_eq!(chars, ('a'..='z').collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn angle_mod_reorders_bottom_row_letters() {
+        let mut c = cfg();
+        c.preset = AlphabetPreset::LowercaseAlpha;
+        let alphabet = build_alphabet_for(&c, &Layout::qwerty(), Geometry::AngleMod);
+        assert!(alphabet.ends_with("cmxzvnb"), "{alphabet}");
+    }
+
+    #[test]
+    fn include_extended_is_sorted_into_the_home_row() {
+        let mut c = cfg();
+        c.include_extended = true;
+        assert_eq!(build_alphabet(&c), "fjdksla;gh'");
+    }
+
+    #[test]
+    fn every_builtin_alphabet_is_in_comfort_order() {
+        use crate::keyboard::{ALL_GEOMETRIES, ALL_LAYOUT_CHOICES};
+        for choice in ALL_LAYOUT_CHOICES {
+            let Some(layout) = Layout::builtin(*choice) else {
+                continue;
+            };
+            for &geometry in ALL_GEOMETRIES {
+                for &preset in ALL_PRESETS {
+                    if preset == AlphabetPreset::Custom {
+                        continue;
+                    }
+                    for (numbers, extended) in [(false, false), (true, true)] {
+                        let mut c = cfg();
+                        c.preset = preset;
+                        c.include_numbers = numbers;
+                        c.include_extended = extended;
+                        let alphabet = build_alphabet_for(&c, &layout, geometry);
+                        let ranks: Vec<_> = alphabet
+                            .chars()
+                            .map(|ch| geometry.comfort_rank(layout.typing_key(ch).unwrap()))
+                            .collect();
+                        assert!(
+                            ranks.windows(2).all(|w| w[0] <= w[1]),
+                            "{choice:?} {geometry:?} {preset:?}: {alphabet}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -290,10 +377,10 @@ mod tests {
     #[test]
     fn custom_additions_are_appended() {
         let mut c = cfg();
-        c.custom_additions = "z".to_string();
+        c.custom_additions = "zé".to_string();
         let alphabet = build_alphabet(&c);
-        assert!(alphabet.contains('z'));
-        assert!(alphabet.starts_with("asdfghjkl"));
+        // Built-in keys are comfort-ordered; additions follow as typed.
+        assert_eq!(alphabet, "fjdkslaghzé");
     }
 
     #[test]
@@ -328,34 +415,40 @@ mod tests {
         let mut c = cfg();
         c.preset = AlphabetPreset::HomeRowExtended;
         let alphabet = build_alphabet(&c);
-        assert!(alphabet.contains(';'));
-        assert!(alphabet.contains('\''));
-        assert!(alphabet.starts_with("asdfghjkl"));
+        assert_eq!(alphabet, "fjdksla;gh'");
     }
 
     #[test]
     fn home_row_follows_layout() {
-        let alphabet = build_alphabet_for(&cfg(), &Layout::dvorak());
-        assert_eq!(alphabet, "aoeuidhtn");
-        let alphabet = build_alphabet_for(&cfg(), &Layout::colemak());
-        assert_eq!(alphabet, "arstdhnei");
+        let g = Geometry::Staggered;
+        let alphabet = build_alphabet_for(&cfg(), &Layout::dvorak(), g);
+        assert_eq!(alphabet, "uhetonaid");
+        let alphabet = build_alphabet_for(&cfg(), &Layout::colemak(), g);
+        assert_eq!(alphabet, "tnseriadh");
     }
 
     #[test]
     fn home_row_extended_follows_layout() {
         let mut c = cfg();
         c.preset = AlphabetPreset::HomeRowExtended;
-        assert_eq!(build_alphabet_for(&c, &Layout::dvorak()), "aoeuidhtns-");
+        assert_eq!(
+            build_alphabet_for(&c, &Layout::dvorak(), Geometry::Staggered),
+            "uhetonasid-"
+        );
     }
 
     #[test]
-    fn lowercase_alpha_on_alt_latin_layout_is_unchanged() {
+    fn lowercase_alpha_on_alt_latin_layout_keeps_the_same_letters() {
         let mut c = cfg();
         c.preset = AlphabetPreset::LowercaseAlpha;
-        assert_eq!(
-            build_alphabet_for(&c, &Layout::dvorak()),
-            build_alphabet_for(&c, &Layout::qwerty())
-        );
+        let sorted = |l: &Layout| {
+            let mut v: Vec<char> = build_alphabet_for(&c, l, Geometry::Staggered)
+                .chars()
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(sorted(&Layout::dvorak()), sorted(&Layout::qwerty()));
     }
 
     #[test]
@@ -367,7 +460,11 @@ mod tests {
                 .enumerate()
                 .map(|(i, ch)| (PhysKey::new(Row::Home, i as i8), ch)),
         );
-        assert_eq!(build_alphabet_for(&cfg(), &cyr), "фывапролд");
+        // QWERTY positions f j d k s l a g h.
+        assert_eq!(
+            build_alphabet_for(&cfg(), &cyr, Geometry::Staggered),
+            "аовлыдфпр"
+        );
     }
 
     #[test]
@@ -375,7 +472,10 @@ mod tests {
         let mut c = cfg();
         c.preset = AlphabetPreset::Custom;
         c.alphabet = "asdf".to_string();
-        assert_eq!(build_alphabet_for(&c, &Layout::dvorak()), "asdf");
+        assert_eq!(
+            build_alphabet_for(&c, &Layout::dvorak(), Geometry::Staggered),
+            "asdf"
+        );
     }
 
     #[test]
@@ -400,7 +500,7 @@ mod tests {
         c.preset = AlphabetPreset::Numbers;
         let alphabet = build_alphabet(&c);
         // Default exclude_ambiguous strips only '0' (kept '1' since
-        // Consolas draws it clearly).
-        assert_eq!(alphabet, "123456789");
+        // Consolas draws it clearly). Digits are finger-ordered too.
+        assert_eq!(alphabet, "473829156");
     }
 }

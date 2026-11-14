@@ -434,14 +434,14 @@ mod tips {
         "Global hotkey to open this settings window.\n\nSame chord syntax as Pick element.";
     pub const STRATEGY: &str = "How hint labels are allocated.\n\n• Shortest first — minimizes average keystrokes (Vimium-style).\n• Fixed length — every label has the same length; predictable but longer.";
     pub const ORDER: &str = "Where the shortest (one-key) hints are placed.\n\n• Center of window — labels radiate out from the middle of the window, where your eyes usually are.\n• Mouse cursor — labels radiate out from the pointer.\n• Reading order — top-left first (the previous behaviour).";
-    pub const PRESET: &str = "Built-in alphabet preset. Home-row presets follow your keyboard layout (e.g. aoeuidhtn on Dvorak).\n\n• Home row — the default; minimal hand travel.\n• Home row + extended — adds ; ' for 11 keys.\n• Alphanumeric — letters + digits, 36 keys.\n• Letters only — full A-Z.\n• Custom — uses the Custom alphabet field below verbatim.";
+    pub const PRESET: &str = "Built-in alphabet preset. Keys follow your keyboard layout (e.g. the home row is aoeuidhtn on Dvorak) and are ordered strongest finger first — index, middle, ring, pinky, then sideways stretches; home row before top and bottom rows — so the closest targets get the easiest keys (f, j… on QWERTY). Custom additions keep the order you type them.\n\n• Home row — the default; minimal hand travel.\n• Home row + extended — adds ; ' for 11 keys.\n• Alphanumeric — letters + digits, 36 keys.\n• Letters only — full A-Z.\n• Custom — uses the Custom alphabet field below verbatim.";
     pub const ALPHABET: &str = "Resolved hint alphabet (rebuilt automatically from the preset and modifier flags).\n\nEdit directly only when 'Custom' preset is selected — otherwise Save will overwrite this with the preset's value.";
     pub const CUSTOM_ADDITIONS: &str = "Extra characters appended to the preset alphabet.\n\nUseful for non-ANSI keyboards or keys you have a habit of hitting (€, ç, ï…). Combined with the preset before ambiguous-character stripping.";
     pub const INCLUDE_NUMBERS: &str =
         "Append 0-9 to the alphabet. Increases capacity from 9 keys to 19 on the home-row preset.";
     pub const INCLUDE_EXTENDED: &str = "Append ; and ' (right-hand pinky stretch) to the alphabet. Two extra single-key hints with no extra hand travel.";
     pub const EXCLUDE_AMBIGUOUS: &str = "Strip O and 0 from the final alphabet so they can't be misread on a busy overlay. The Consolas overlay font already differentiates I, l, 1.";
-    pub const MIN_SINGLES: &str = "Guarantees at least this many one-keystroke hints, even on busy scenes where math-optimal allocation would skip them.\n\nDefault 8 = 'use every home-row letter as a single before doubling up'. Capped at (alphabet length − 1) at runtime so multi-char hints still have a prefix slot.";
+    pub const MIN_SINGLES: &str = "Guarantees at least this many one-keystroke hints, even on busy scenes where math-optimal allocation would skip them.\n\nDefault 7: on the 9-key home row, up to two keys (d, then k on QWERTY) can lead two-key hints; keyhop uses one or two, whichever needs fewer keystrokes. Capped at (alphabet length − 1) at runtime so multi-char hints still have a prefix slot.";
     pub const ELEMENT_BG: &str = "Background color of element badges. Format: #RRGGBB.\n\nClick the swatch to pick visually.";
     pub const WINDOW_BG: &str = "Background color of window-picker badges. Format: #RRGGBB.\n\nClick the swatch to pick visually.";
     pub const ELEMENT_OPACITY: &str =
@@ -1860,7 +1860,8 @@ fn collect_config() -> Option<(Config, bool)> {
         // ready-to-use alphabet — even if a future build can't read
         // the preset enum (or someone hand-edits the field), the
         // engine still gets a usable character set.
-        let resolved_alphabet = alphabet_presets::build_alphabet_for(&hints_partial, &layout);
+        let resolved_alphabet =
+            alphabet_presets::build_alphabet_for(&hints_partial, &layout, geometry);
         let hints = HintConfig {
             alphabet: resolved_alphabet,
             ..hints_partial

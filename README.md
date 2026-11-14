@@ -130,7 +130,7 @@ After launching, `keyhop` registers two global hotkeys and a tray icon. The defa
 | Settings        | Tray menu → Settings... | Open the visual configuration dialog.                                              |
 | Quit            | Tray menu → Quit        | Cleanly exits `keyhop`.                                                            |
 
-The modifier only needs to be held on the **last** (completing) keystroke — you don't have to hold it while typing a multi-letter label. For example, to double-click an element with the label `la`, type `l` normally, then hold `Ctrl` and press `a`. If both `Ctrl` and `Shift` are held, `Ctrl` (double-click) takes precedence.
+The modifier only needs to be held on the **last** (completing) keystroke — you don't have to hold it while typing a multi-letter label. For example, to double-click an element with the label `df`, type `d` normally, then hold `Ctrl` and press `f`. If both `Ctrl` and `Shift` are held, `Ctrl` (double-click) takes precedence.
 
 The tray icon's right-click menu mirrors the two leader chords, gives you a `Settings...` entry to customize keyhop visually, and (in release builds) a `View Log` shortcut so you can debug without leaving the keyboard.
 
@@ -145,13 +145,13 @@ Yellow badges = element picker (will *invoke* the control). Orange badges = wind
 `keyhop` is configured through a small visual dialog reachable from the tray icon (`Settings...`), so you never have to touch a config file unless you want to. The dialog lets you change:
 
 - **Hotkeys** — both leader chords. Type any combination of `Ctrl`, `Shift`, `Alt`, `Win`/`Super` modifiers plus a key (`A`-`Z`, `0`-`9`, `F1`-`F24`, `Space`, arrow keys, punctuation, etc.). Example: `Ctrl+Alt+K`.
-- **Hint alphabet** — the characters used to build hint labels. Default `asdfghjkl` (the home row). The Settings dialog now also exposes:
+- **Hint alphabet** — the characters used to build hint labels. Default: the home row, `fjdkslagh` on QWERTY. Built-in presets are ordered strongest finger first — index, middle, ring, pinky, then sideways stretches; home row before the top, bottom and number rows — so the closest targets get the easiest keys. The order follows your keyboard layout and geometry (on an angle-mod board `c` counts as an index key). Two-key hints start with the strongest-finger keys that can still be followed by nearly every other key — the middle fingers, `d` then `k`, on the home row — since `f` / `j` can't be followed by `g` / `h` under the same-finger rule. The Settings dialog now also exposes:
   - a **preset** dropdown (`home_row`, `home_row_extended`, `lowercase_alpha`, `alphanumeric`, `numbers`, `custom`),
-  - **Include numbers** / **Include extended (`;` `'`)** toggles that append digits or the extended home-row keys,
+  - **Include numbers** / **Include extended (`;` `'`)** toggles that add digits or the extended home-row keys (sorted into place by finger),
   - **Exclude ambiguous (O / 0)** to strip easy-to-confuse glyphs,
-  - and a **Custom additions** field for keyboard layouts that need extras beyond the preset.
+  - and a **Custom additions** field for keyboard layouts that need extras beyond the preset (added after the preset keys, in the order you type them).
 - **Hint strategy** — `Shortest first` (default) hands out single-character hints to the first `alphabet.len()` targets, then two-character hints, and so on (so up to 9 targets only need *one* keystroke). `Fixed length` reproduces the v0.3.0 behaviour where every label is the same length.
-- **Label order** — where the shortest (one-key) hints land. `Center of window` (default) gives `a`, `s`, `d`… to the controls nearest the middle of the window — where your eyes usually are — and spreads outward; `Mouse cursor` spreads outward from the pointer; `Reading order` restores the old top-left-first assignment. Sorting a few hundred rectangles takes microseconds, so there's no measurable cost.
+- **Label order** — where the shortest (one-key) hints land. `Center of window` (default) gives `f`, `j`, … to the controls nearest the middle of the window — where your eyes usually are — and spreads outward; `Mouse cursor` spreads outward from the pointer; `Reading order` restores the old top-left-first assignment. Sorting a few hundred rectangles takes microseconds, so there's no measurable cost.
 - **Scope** — pick which surface the element picker walks: `Active window` (default, v0.3.0 behaviour), `Active monitor` (every visible top-level window on the monitor under your cursor), or `All windows` (every monitor; capped by `max_elements`, default 300, so a busy desktop can't render thousands of badges).
 - **Performance** — toggles the in-process element-tree cache (default on, 500 ms TTL). The cache memoises each window's UIA enumeration so the "press Esc, retry" flow is instant on a steady screen.
 - **Overlay colors** — element badge background and window badge background, as `#RRGGBB` hex.
@@ -173,7 +173,7 @@ pick_element = "Ctrl+Shift+Space"
 pick_window  = "Ctrl+Alt+Space"
 
 [hints]
-alphabet           = "asdfghjkl"
+alphabet           = "fjdkslagh"
 strategy           = "shortest_first"   # shortest_first | fixed_length
 order              = "center"           # center | cursor | reading — where the shortest labels land
 preset             = "home_row"          # home_row | home_row_extended | lowercase_alpha | alphanumeric | numbers | custom

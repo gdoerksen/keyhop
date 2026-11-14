@@ -78,7 +78,8 @@ impl Default for HotkeyBindings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct HintConfig {
-    /// Characters used to build hint labels. Default: home row `asdfghjkl`.
+    /// Characters used to build hint labels, best key first. Default: the
+    /// home row in finger-comfort order, `fjdkslagh`.
     /// When empty (and a `preset` is set), the alphabet is derived from
     /// the preset/builder fields below.
     pub alphabet: String,
@@ -110,17 +111,19 @@ pub struct HintConfig {
     /// average-keystroke optimal but ergonomically surprising: users
     /// expect "shortest first" to mean "at least one single-key hint".
     ///
-    /// Setting this to a positive number reserves that many length-1
-    /// hints from `alphabet[0..min_singles]`, then runs the Vimium
-    /// allocator over the remaining `n − min_singles` prefix slots for
-    /// the rest of the count. Trades a small average-typing penalty
+    /// Setting this to a positive number reserves at least that many
+    /// length-1 hints, then spreads the rest of the count over the
+    /// remaining prefix keys (the strongest-finger keys that can still
+    /// be followed by nearly every other key — `d` then `k` on the
+    /// QWERTY home row). Trades a small average-typing penalty
     /// for guaranteed one-key reach on the most-likely targets.
     ///
     /// Capped at `n − 1` at runtime (we always leave at least one
-    /// prefix slot for multi-char hints when count > n). Default `8`
-    /// matches the home-row alphabet's "all letters as singles, last
-    /// one reserved as prefix" convention that vim-style hint tools
-    /// (Vimium, Surfingkeys, easymotion) ship with — set to `0` to
+    /// prefix slot for multi-char hints when count > n). Default `7`
+    /// leaves room for two prefix keys on the 9-key home row: busy
+    /// scenes use 8 singles and one prefix (`d`) while that's cheapest,
+    /// then 7 singles and two (`d`, `k`) once more targets need it —
+    /// whichever needs fewer keystrokes. Set to `0` to
     /// fall back to the math-optimal Vimium allocation that
     /// minimises average keystrokes at the cost of one-key reach.
     #[serde(default = "default_min_singles")]
@@ -144,7 +147,7 @@ pub struct HintConfig {
 /// users upgrading from earlier [Unreleased] builds where the default
 /// was `0` would otherwise lose the new behaviour silently.
 fn default_min_singles() -> usize {
-    8
+    7
 }
 
 impl Default for HintConfig {
@@ -170,12 +173,12 @@ impl Default for HintConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AlphabetPreset {
-    /// Home row (`asdfghjkl`). Default — minimum hand movement.
+    /// Home row (`fjdkslagh` on QWERTY). Default — minimum hand movement.
     #[default]
     HomeRow,
-    /// Home row plus right-hand extension keys (`asdfghjkl;'`).
+    /// Home row plus right-hand extension keys (`fjdksla;gh'`).
     HomeRowExtended,
-    /// Lowercase a-z.
+    /// All 26 letters, home row first (`fjdkslagh rueiwoqpty vmcxzbn`).
     LowercaseAlpha,
     /// Lowercase a-z plus 0-9.
     Alphanumeric,
