@@ -602,7 +602,7 @@ impl HintEngine {
     /// of a multi-key label. Finger strength decides, among keys that keep
     /// nearly full capacity:
     ///
-    /// 1. **Near-best keys** — at least [`PREFIX_CAPACITY_PERCENT`] of the
+    /// 1. **Near-best keys** — more than [`PREFIX_CAPACITY_PERCENT`] of the
     ///    best key's allowed second keys — come first, strongest finger
     ///    first (index, middle, ring, pinky; unknown fingers last), then
     ///    more second keys, then alphabet (comfort) order.
@@ -613,7 +613,9 @@ impl HintEngine {
     /// drop out and the middle fingers lead: `d k s l a f j g h`. For
     /// `a-z` the right pinky's `p` allows the most (25), but the middle
     /// fingers' `k` / `i` (24) and `d` / `e` / `c` (23) are close enough,
-    /// so they lead instead of `p`.
+    /// so they lead instead of `p`. With the extended home row (`; '`) the
+    /// middle fingers allow 10 and `f` / `j` 9 — exactly 90%, not above
+    /// it — so the middle fingers still lead there.
     fn prefix_rank(&self, succ: &[Vec<usize>]) -> Vec<usize> {
         let best = succ.iter().map(Vec::len).max().unwrap_or(0);
         let tier = |i: usize| {
@@ -624,7 +626,7 @@ impl HintEngine {
         };
         let mut rank: Vec<usize> = (0..succ.len()).collect();
         rank.sort_by_key(|&i| {
-            let near_best = succ[i].len() * 100 >= best * PREFIX_CAPACITY_PERCENT;
+            let near_best = succ[i].len() * 100 > best * PREFIX_CAPACITY_PERCENT;
             let finger = if near_best { tier(i) } else { 0 };
             (!near_best, finger, std::cmp::Reverse(succ[i].len()))
         });
@@ -632,11 +634,13 @@ impl HintEngine {
     }
 }
 
-/// How close (in percent of the best key's allowed second keys) a key must
-/// be to count as a full-capacity prefix in [`HintEngine::prefix_rank`].
-/// Among such keys finger strength decides; below it, capacity does. 90%
-/// treats losing one second key in ten as worth trading for a stronger
-/// finger, but not one in eight (`f` on the 9-key home row).
+/// A key must keep *more than* this percentage of the best key's allowed
+/// second keys to count as a full-capacity prefix in
+/// [`HintEngine::prefix_rank`]. Among such keys finger strength decides;
+/// otherwise capacity does. Strict, so losing a tenth or more disqualifies
+/// a key: `f` / `j` lose one of eight on the home row and one of ten on
+/// the extended home row (both measurably costlier as prefixes), while the
+/// a-z middle-finger keys lose one or two of 25 (no measurable cost).
 const PREFIX_CAPACITY_PERCENT: usize = 90;
 
 /// All one-character extensions of `path` allowed by `succ`.
@@ -879,6 +883,19 @@ mod tests {
         let labels = e.generate(60);
         assert_eq!(prefixes_of(&labels)[..2], ['k', 'i']);
         assert!(!prefixes_of(&labels).contains(&'p'));
+    }
+
+    #[test]
+    fn extended_home_row_keeps_middle_finger_prefixes() {
+        // 11 keys: middle fingers allow 10 second keys, 'f' / 'j' 9 (they
+        // lose 'g' / 'h'). Exactly 90% doesn't qualify, so the index keys
+        // (and the 'g' / 'h' stretches) don't lead.
+        let alphabet = "fjdksla;gh'";
+        let e = HintEngine::new(alphabet).with_min_singles(7).with_key_rule(
+            ConsecutiveKeys::NoSameFinger,
+            fingers_for(alphabet, &Layout::qwerty(), Geometry::Staggered),
+        );
+        assert_eq!(prefixes_of(&e.generate(40)), vec!['d', 'k', 's', 'l']);
     }
 
     #[test]
