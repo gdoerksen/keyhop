@@ -628,18 +628,14 @@ fn build_hint_engine(
         _ => None,
     };
     let layout = keyhop::Layout::resolve(keyboard.layout, detected);
-    let alphabet = keyhop::alphabet_presets::build_alphabet_for(hints, &layout);
+    let alphabet = keyhop::alphabet_presets::build_alphabet_for(hints, &layout, keyboard.geometry);
     tracing::debug!(%alphabet, "hint alphabet resolved");
-    // Finger per alphabet character. Characters the layout doesn't have
-    // are typed via their QWERTY key (see `keyboard_layout::key_chars`),
-    // so look them up on QWERTY.
-    let qwerty = keyhop::Layout::qwerty_ref();
+    // Finger per alphabet character, via the key the user actually presses.
     let fingers = alphabet
         .chars()
         .map(|c| {
             layout
-                .key_of(c)
-                .or_else(|| qwerty.key_of(c))
+                .typing_key(c)
                 .map_or(&[][..], |k| keyboard.geometry.fingers(k))
         })
         .collect();

@@ -12,16 +12,19 @@
 //!   matched. This is the lowest-keystroke strategy and matches what
 //!   Vimium / surfingkeys do.
 //!
-//! The default alphabet is the home row (`asdfghjkl`) so the most common
-//! single-character hints stay under the resting position of the typing
-//! hand.
+//! The default alphabet is the home row, strongest finger first
+//! (`fjdkslagh`), so the most common single-character hints stay under
+//! the index and middle fingers. Alphabet order is a preference list:
+//! earlier characters get the shorter hints.
 
 use serde::{Deserialize, Serialize};
 
 use crate::keyboard::Finger;
 
-/// Default home-row alphabet, ordered by typing comfort for QWERTY layouts.
-pub const DEFAULT_ALPHABET: &str = "asdfghjkl";
+/// Default home-row alphabet for QWERTY, in finger-comfort order. Must
+/// equal what `alphabet_presets::build_alphabet` produces for the default
+/// config (a test enforces it).
+pub const DEFAULT_ALPHABET: &str = "fjdkslagh";
 
 /// Which hint-allocation strategy [`HintEngine::generate`] uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -89,6 +92,14 @@ impl HintEngine {
     /// the alphabet are preserved as-is; callers are responsible for
     /// deduping if desired.
     ///
+    /// **Order matters:** the alphabet is read as a preference list, best
+    /// key first (built-in presets are sorted this way by
+    /// [`crate::keyboard::comfort_order`]). Single-key hints and second
+    /// keys follow it. Without a key rule, prefixes of longer hints come
+    /// from the back. With one (see [`Self::with_key_rule`]), prefixes
+    /// are the keys with the most allowed second keys, ties to the earlier
+    /// key, so strong keys lead multi-key hints when they don't clash.
+    ///
     /// # Panics
     ///
     /// Panics if `alphabet` is empty.
@@ -142,9 +153,10 @@ impl HintEngine {
     /// (math-optimal Vimium allocation).
     ///
     /// When set to `m > 0` and `count > alphabet.len()`, the allocator
-    /// forces `min(m, n − 1, count)` length-1 hints from the start of
-    /// the alphabet, then runs the Vimium allocator over the remaining
-    /// `n − m` prefix slots for the rest of the count. Trades a small
+    /// forces at least `min(m, n − 1, count)` length-1 hints, then spreads
+    /// the rest of the count over the remaining prefix keys. Without a
+    /// key rule the singles are the start of the alphabet; with one they
+    /// are every key not picked as a prefix (see [`Self::new`]). Trades a small
     /// average-typing penalty for guaranteed one-key reach on the
     /// first `m` elements (which are usually the most likely targets,
     /// since the element picker sorts elements nearest the configured
@@ -480,12 +492,29 @@ impl HintEngine {
         let n = self.alphabet.len();
         let remaining = count - forced;
 
-        let mut out: Vec<String> = (0..forced).map(|i| self.encode(i, 1)).collect();
+        // Split the alphabet into single-key labels and prefixes. Prefixes
+        // are the keys that lead into the most second keys (see
+        // [`prefix_rank`]); singles are everything else, best first.
+        let roots: Vec<Vec<usize>> = if forced == 0 {
+            (0..n).map(|i| vec![i]).collect()
+        } else {
+            prefix_rank(succ)[..n - forced]
+                .iter()
+                .map(|&i| vec![i])
+                .collect()
+        };
+        let mut out: Vec<String> = if forced == 0 {
+            Vec::new()
+        } else {
+            (0..n)
+                .filter(|i| !roots.iter().any(|r| r[0] == *i))
+                .map(|i| self.alphabet[i].to_string())
+                .collect()
+        };
 
         // `prev` = level L-1, `cur` = level L. With forced singles the
         // length-1 prefixes aren't labels themselves, so we start at L=2
         // and never demote back to length 1.
-        let roots: Vec<Vec<usize>> = (forced..n).map(|i| vec![i]).collect();
         let (mut prev, mut cur) = if forced == 0 {
             (Vec::new(), roots)
         } else {
@@ -566,6 +595,17 @@ impl HintEngine {
         }
         chars.into_iter().collect()
     }
+}
+
+/// Alphabet indices ordered by how good each key is as the first key of a
+/// multi-key label: most allowed second keys first, ties to the earlier
+/// (more comfortable) key. On the QWERTY home row under the same-finger
+/// rule that's `d k s l a f j g h`: the middle fingers lead, since `f` /
+/// `j` can't be followed by `g` / `h`.
+fn prefix_rank(succ: &[Vec<usize>]) -> Vec<usize> {
+    let mut rank: Vec<usize> = (0..succ.len()).collect();
+    rank.sort_by_key(|&i| std::cmp::Reverse(succ[i].len()));
+    rank
 }
 
 /// All one-character extensions of `path` allowed by `succ`.
@@ -667,7 +707,7 @@ mod tests {
 
     fn default_app_engine() -> HintEngine {
         HintEngine::new(DEFAULT_ALPHABET)
-            .with_min_singles(8)
+            .with_min_singles(7)
             .with_key_rule(
                 ConsecutiveKeys::NoSameFinger,
                 fingers_for(DEFAULT_ALPHABET, &Layout::qwerty(), Geometry::Staggered),
@@ -708,7 +748,9 @@ mod tests {
         for count in [10, 17, 50, 100, 300] {
             let labels = e.generate(count);
             let singles = labels.iter().filter(|l| l.len() == 1).count();
-            assert_eq!(singles, 8, "count={count}");
+            // One prefix key ('d') while it suffices, two ('d', 'k') after.
+            let expected = if count <= 16 { 8 } else { 7 };
+            assert_eq!(singles, expected, "count={count}");
             let mut lens: Vec<usize> = labels
                 .iter()
                 .filter(|l| l.len() > 1)
@@ -731,14 +773,25 @@ mod tests {
 
     #[test]
     fn no_same_finger_default_examples() {
-        // 8 singles a..k; 'l' (right ring) can't be followed by 'l', and
-        // nothing else on the home row shares its finger.
+        // Prefixes are the keys with the most allowed second keys: 'd' and
+        // 'k' (middle fingers) clash with nothing else on the home row,
+        // while 'f'/'j' can't be followed by 'g'/'h'. Up to 16 targets one
+        // prefix suffices, so 'k' stays a single.
         let labels = default_app_engine().generate(16);
         assert_eq!(
             labels,
             vec![
-                "a", "s", "d", "f", "g", "h", "j", "k", "la", "ls", "ld", "lf", "lg", "lh", "lj",
-                "lk"
+                "f", "j", "k", "s", "l", "a", "g", "h", "df", "dj", "dk", "ds", "dl", "da", "dg",
+                "dh"
+            ]
+        );
+        // One more target and 'k' becomes the second prefix.
+        let labels = default_app_engine().generate(17);
+        assert_eq!(
+            labels,
+            vec![
+                "f", "j", "s", "l", "a", "g", "h", "df", "dj", "dk", "ds", "dl", "da", "dg", "dh",
+                "kf", "kj"
             ]
         );
         assert!(!default_app_engine()
@@ -748,7 +801,7 @@ mod tests {
                 || l.contains("gf")
                 || l.contains("hj")
                 || l.contains("jh")
-                || l.contains("ll")));
+                || l.contains("hh")));
     }
 
     #[test]
@@ -768,7 +821,7 @@ mod tests {
         for count in [5, 10, 17, 50, 300] {
             assert_eq!(legacy.generate(count), allow.generate(count));
         }
-        assert!(legacy.generate(17).contains(&"ll".to_string()));
+        assert!(legacy.generate(17).contains(&"hh".to_string()));
     }
 
     #[test]
@@ -897,7 +950,7 @@ mod tests {
     fn shortest_first_uses_single_chars_when_possible() {
         let e = HintEngine::new(DEFAULT_ALPHABET);
         let labels = e.generate(5);
-        assert_eq!(labels, vec!["a", "s", "d", "f", "g"]);
+        assert_eq!(labels, vec!["f", "j", "d", "k", "s"]);
         assert!(labels.iter().all(|l| l.len() == 1));
     }
 
@@ -1055,10 +1108,10 @@ mod tests {
         // Exactly 4 length-1 labels, taken from the start of alphabet.
         let singles: Vec<&String> = labels.iter().filter(|l| l.len() == 1).collect();
         assert_eq!(singles.len(), 4);
-        assert_eq!(singles[0], "a");
-        assert_eq!(singles[1], "s");
+        assert_eq!(singles[0], "f");
+        assert_eq!(singles[1], "j");
         assert_eq!(singles[2], "d");
-        assert_eq!(singles[3], "f");
+        assert_eq!(singles[3], "k");
     }
 
     #[test]
@@ -1101,7 +1154,7 @@ mod tests {
         // a no-op (and we don't emit *more* singles than `count`).
         let e = HintEngine::new(DEFAULT_ALPHABET).with_min_singles(7);
         let labels = e.generate(3);
-        assert_eq!(labels, vec!["a", "s", "d"]);
+        assert_eq!(labels, vec!["f", "j", "d"]);
     }
 
     #[test]

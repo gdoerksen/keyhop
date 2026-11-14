@@ -126,6 +126,103 @@ impl Geometry {
         }
         single(self.finger(key))
     }
+
+    /// The column `finger` rests on in `row` — the key it reaches without
+    /// stretching sideways. Normally the finger's home-row column; with
+    /// [`Geometry::AngleMod`] the left hand's bottom row sits one column
+    /// toward the pinky (`c` is the index finger's natural key, `z` the
+    /// ring finger's).
+    pub fn home_col(self, finger: Finger, row: Row) -> i8 {
+        let col = match finger {
+            Finger::LeftPinky => 0,
+            Finger::LeftRing => 1,
+            Finger::LeftMiddle => 2,
+            Finger::LeftIndex => 3,
+            Finger::RightIndex => 6,
+            Finger::RightMiddle => 7,
+            Finger::RightRing => 8,
+            Finger::RightPinky => 9,
+        };
+        if self == Geometry::AngleMod && row == Row::Bottom && finger.is_left() {
+            col - 1
+        } else {
+            col
+        }
+    }
+
+    /// How comfortable `key` is to type; smaller is better. See
+    /// [`ComfortRank`] for the ordering rule.
+    pub fn comfort_rank(self, key: PhysKey) -> ComfortRank {
+        let finger = self.finger(key);
+        let distance = (key.col - self.home_col(finger, key.row)).unsigned_abs();
+        ComfortRank {
+            row: match key.row {
+                Row::Home => 0,
+                Row::Top => 1,
+                Row::Bottom => 2,
+                Row::Number => 3,
+            },
+            stretch: distance > 0,
+            finger: finger.tier(),
+            distance,
+            right_hand: !finger.is_left(),
+        }
+    }
+}
+
+/// Every [`Geometry`], in Settings-dropdown order.
+pub const ALL_GEOMETRIES: &[Geometry] = &[Geometry::Staggered, Geometry::AngleMod, Geometry::Ortho];
+
+impl Finger {
+    /// True for the left hand's fingers.
+    pub fn is_left(self) -> bool {
+        matches!(
+            self,
+            Finger::LeftPinky | Finger::LeftRing | Finger::LeftMiddle | Finger::LeftIndex
+        )
+    }
+
+    /// Strength tier: index 0, middle 1, ring 2, pinky 3.
+    fn tier(self) -> u8 {
+        match self {
+            Finger::LeftIndex | Finger::RightIndex => 0,
+            Finger::LeftMiddle | Finger::RightMiddle => 1,
+            Finger::LeftRing | Finger::RightRing => 2,
+            Finger::LeftPinky | Finger::RightPinky => 3,
+        }
+    }
+}
+
+/// Typing-comfort rank of a key (see [`Geometry::comfort_rank`]). Compares
+/// field by field, smaller first:
+///
+/// 1. **Row** — home, then top, bottom, number.
+/// 2. **Stretch** — keys a finger rests on before keys it reaches sideways
+///    for (the index fingers' inner column, the pinky extensions).
+/// 3. **Finger** — index, middle, ring, pinky.
+/// 4. **Distance** from the finger's resting column.
+/// 5. **Hand** — left before right.
+///
+/// On QWERTY (staggered) the home row ranks `f j d k s l a ; g h '`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ComfortRank {
+    row: u8,
+    stretch: bool,
+    finger: u8,
+    distance: u8,
+    right_hand: bool,
+}
+
+/// Reorder `chars` from most to least comfortable to type on `layout` /
+/// `geometry` (see [`ComfortRank`]). Stable: characters of equal rank, and
+/// characters with no key at all (which go last), keep their order.
+pub fn comfort_order(chars: &str, layout: &Layout, geometry: Geometry) -> String {
+    let mut ranked: Vec<(Option<ComfortRank>, char)> = chars
+        .chars()
+        .map(|c| (layout.typing_key(c).map(|k| geometry.comfort_rank(k)), c))
+        .collect();
+    ranked.sort_by_key(|(rank, _)| (rank.is_none(), *rank));
+    ranked.into_iter().map(|(_, c)| c).collect()
 }
 
 fn single(f: Finger) -> &'static [Finger] {
@@ -321,6 +418,13 @@ impl Layout {
     pub fn key_of(&self, c: char) -> Option<PhysKey> {
         let c = lower(c);
         self.keys.iter().find(|(_, ch)| *ch == c).map(|(k, _)| *k)
+    }
+
+    /// The key the user presses for `c`: its position on this layout, or —
+    /// for characters this layout doesn't type — the QWERTY position, which
+    /// the overlay also accepts (see `crate::windows::keyboard_layout`).
+    pub fn typing_key(&self, c: char) -> Option<PhysKey> {
+        self.key_of(c).or_else(|| Layout::qwerty_ref().key_of(c))
     }
 
     /// The characters of the 9 home-row keys `a`…`l` (QWERTY positions),
@@ -545,6 +649,51 @@ mod tests {
         assert_eq!(f('a'), Finger::LeftPinky);
         assert_eq!(f('n'), Finger::RightIndex);
         assert_eq!(g.finger(PhysKey::new(Row::Bottom, -1)), Finger::LeftPinky);
+    }
+
+    fn ordered(chars: &str, g: Geometry) -> String {
+        comfort_order(chars, &Layout::qwerty(), g)
+    }
+
+    #[test]
+    fn comfort_order_qwerty_staggered_rows() {
+        let g = Geometry::Staggered;
+        assert_eq!(ordered("asdfghjkl;'", g), "fjdksla;gh'");
+        assert_eq!(ordered("qwertyuiop[]\\", g), "rueiwoqpty[]\\");
+        assert_eq!(ordered("zxcvbnm,./", g), "vmc,x.z/bn");
+        assert_eq!(ordered("1234567890", g), "4738291056");
+        // Rows rank home, top, bottom, number.
+        assert_eq!(ordered("1zqa", g), "aqz1");
+    }
+
+    #[test]
+    fn comfort_order_angle_mod_bottom_row() {
+        // c is the left index finger's natural bottom key; v and b are
+        // stretches; z and x move to ring and middle.
+        assert_eq!(ordered("zxcvbnm,./", Geometry::AngleMod), "cmx,z./vnb");
+    }
+
+    #[test]
+    fn comfort_order_ortho_matches_staggered_letters() {
+        for row in ["asdfghjkl;'", "qwertyuiop[]\\", "zxcvbnm,./"] {
+            assert_eq!(
+                ordered(row, Geometry::Ortho),
+                ordered(row, Geometry::Staggered)
+            );
+        }
+    }
+
+    #[test]
+    fn comfort_order_unknown_chars_go_last_in_order() {
+        assert_eq!(ordered("éafü", Geometry::Staggered), "faéü");
+    }
+
+    #[test]
+    fn typing_key_falls_back_to_qwerty() {
+        let cyr = Layout::from_pairs([(PhysKey::new(Row::Home, 0), 'ф')]);
+        assert_eq!(cyr.typing_key('ф'), Some(PhysKey::new(Row::Home, 0)));
+        assert_eq!(cyr.typing_key('s'), Some(PhysKey::new(Row::Home, 1)));
+        assert_eq!(cyr.typing_key('é'), None);
     }
 
     #[test]
