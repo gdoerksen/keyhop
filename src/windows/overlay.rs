@@ -291,6 +291,17 @@ impl HintStyle {
         }
     }
 
+    /// Scale font and padding by a monitor DPI factor (1.0 = 96 DPI).
+    /// Factors at or below 1.0 leave the style unchanged.
+    pub fn scaled_for_dpi(mut self, scale: f32) -> Self {
+        if scale > 1.0 {
+            self.font_height = ((self.font_height as f32) * scale).round() as i32;
+            self.padding_x = ((self.padding_x as f32) * scale).ceil() as i32;
+            self.padding_y = ((self.padding_y as f32) * scale).ceil() as i32;
+        }
+        self
+    }
+
     /// Build the element-picker style, overriding any non-empty colors
     /// from the user config. Empty strings keep the hardcoded defaults so
     /// users can override one swatch at a time without filling out every
@@ -451,11 +462,7 @@ impl OverlayState {
             std::ptr::write_bytes(bits, 0, (width as usize) * (height as usize) * 4);
         }
 
-        let _ = SetBkMode(mem_dc, TRANSPARENT);
-
-        for laid in &self.laid {
-            self.draw_hint(mem_dc, bits, width, height, laid);
-        }
+        self.draw_all(mem_dc, bits, width, height);
 
         // Hand the finished frame to DWM. SourceConstantAlpha applies
         // the per-window opacity over the per-pixel alpha — same visual
@@ -483,6 +490,16 @@ impl OverlayState {
             Some(&blend as *const _),
             ULW_ALPHA,
         );
+    }
+
+    /// Draw every visible hint into an already-cleared DIB. Split out of
+    /// [`Self::render_to_dib`] so the benchmarks can time our drawing
+    /// without the full-surface clear or the DWM hand-off.
+    unsafe fn draw_all(&self, mem_dc: HDC, bits: *mut u8, width: i32, height: i32) {
+        let _ = SetBkMode(mem_dc, TRANSPARENT);
+        for laid in &self.laid {
+            self.draw_hint(mem_dc, bits, width, height, laid);
+        }
     }
 
     unsafe fn draw_hint(&self, hdc: HDC, bits: *mut u8, dib_w: i32, dib_h: i32, laid: &LaidHint) {
@@ -1554,10 +1571,8 @@ impl PersistentOverlay {
         if style.auto_scale_dpi {
             if let Some(first) = hints.first() {
                 let scale = dpi_scale_for_bounds(&first.bounds);
+                style = style.scaled_for_dpi(scale);
                 if scale > 1.0 {
-                    style.font_height = ((style.font_height as f32) * scale).round() as i32;
-                    style.padding_x = ((style.padding_x as f32) * scale).ceil() as i32;
-                    style.padding_y = ((style.padding_y as f32) * scale).ceil() as i32;
                     tracing::debug!(scale, font_height = style.font_height, "DPI-scaled overlay");
                 }
             }
@@ -1913,6 +1928,182 @@ unsafe fn fill_triangle_argb(
             };
             if inside {
                 put_pixel_argb(bits, dib_w, dib_h, x, y, color);
+            }
+        }
+    }
+}
+
+/// Benchmark-only access to the overlay's private layout and drawing
+/// code. Compiled only with the `bench` cargo feature; not part of the
+/// public API. Everything here draws into an in-memory DIB — no HWND,
+/// no `UpdateLayeredWindow` — so timings reflect our code, not DWM.
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub mod bench {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{SM_CXSCREEN, SM_CYSCREEN};
+
+    /// Size of the primary monitor in physical pixels. Synthetic hints
+    /// are placed on it so `lay_out`'s per-hint monitor query resolves
+    /// the same way on every run.
+    pub fn primary_size() -> (i32, i32) {
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
+        }
+    }
+
+    /// Tiny deterministic PRNG (LCG) so scenarios are identical run to run.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) as u32
+        }
+        fn range(&mut self, lo: i32, hi: i32) -> i32 {
+            lo + (self.next() % ((hi - lo).max(1) as u32)) as i32
+        }
+    }
+
+    fn with_labels(bounds: Vec<Bounds>) -> Vec<Hint> {
+        let labels = crate::HintEngine::new(crate::DEFAULT_ALPHABET).generate(bounds.len());
+        bounds
+            .into_iter()
+            .zip(labels)
+            .map(|(bounds, label)| Hint {
+                bounds,
+                label,
+                extra: None,
+            })
+            .collect()
+    }
+
+    /// `n` element-sized rects (16–200 px wide, 16–40 px tall) on a
+    /// jittered grid across the primary monitor. Dense enough at 300+
+    /// that badges collide like they do over a busy app.
+    pub fn scattered_hints(n: usize) -> Vec<Hint> {
+        let (sw, sh) = primary_size();
+        let mut rng = Lcg(0x5EED);
+        let cols = ((n as f32 * sw as f32 / sh as f32).sqrt().ceil() as i32).max(1);
+        let rows = ((n as i32 + cols - 1) / cols).max(1);
+        let cell_w = sw / cols;
+        let cell_h = sh / rows;
+        let bounds = (0..n as i32)
+            .map(|i| {
+                let (c, r) = (i % cols, i / cols);
+                let w = rng.range(16, 200).min(cell_w.max(17) - 1);
+                let h = rng.range(16, 40).min(cell_h.max(17) - 1);
+                Bounds {
+                    x: c * cell_w + rng.range(0, (cell_w - w).max(1)),
+                    y: r * cell_h + rng.range(0, (cell_h - h).max(1)),
+                    width: w,
+                    height: h,
+                }
+            })
+            .collect();
+        with_labels(bounds)
+    }
+
+    /// `n` list rows, 300×22 px, stacked in columns down the primary
+    /// monitor — the menu / tree-view / file-list case where rows are
+    /// shorter than a badge plus gap.
+    pub fn dense_list_hints(n: usize) -> Vec<Hint> {
+        let (_, sh) = primary_size();
+        let rows_per_col = ((sh - 80) / 22).max(1) as usize;
+        let bounds = (0..n)
+            .map(|i| Bounds {
+                x: 40 + (i / rows_per_col) as i32 * 360,
+                y: 40 + (i % rows_per_col) as i32 * 22,
+                width: 300,
+                height: 22,
+            })
+            .collect();
+        with_labels(bounds)
+    }
+
+    /// Run only the layout pass. Returns the hint count so the optimizer
+    /// can't discard the work.
+    pub fn lay_out_only(hints: &[Hint], style: &HintStyle) -> usize {
+        lay_out(hints, style, 0, 0).len()
+    }
+
+    /// Off-screen BGRA surface standing in for the overlay DIB.
+    pub struct Surface {
+        mem_dc: HDC,
+        dib: HBITMAP,
+        bits: *mut u8,
+        width: i32,
+        height: i32,
+    }
+
+    impl Surface {
+        pub fn new(width: i32, height: i32) -> Self {
+            let (mem_dc, dib, bits) =
+                unsafe { create_dib_surface(width, height).expect("bench DIB surface") };
+            Self {
+                mem_dc,
+                dib,
+                bits,
+                width,
+                height,
+            }
+        }
+
+        /// The full-surface clear `render_to_dib` does every frame.
+        pub fn clear(&mut self) {
+            unsafe {
+                std::ptr::write_bytes(self.bits, 0, (self.width * self.height * 4) as usize);
+            }
+        }
+    }
+
+    impl Drop for Surface {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DeleteDC(self.mem_dc);
+                let _ = DeleteObject(HGDIOBJ(self.dib.0));
+            }
+        }
+    }
+
+    /// A laid-out pick, ready to draw repeatedly.
+    pub struct Prepared(OverlayState);
+
+    impl Prepared {
+        /// Lay out `hints` and create fonts, as `run_pick` does at pick start.
+        pub fn new(hints: Vec<Hint>, style: HintStyle) -> Self {
+            Self(unsafe { OverlayState::new(hints, style, 0, 0) })
+        }
+
+        /// Simulate the user having typed `prefix` (hides non-matching hints).
+        pub fn set_typed(&mut self, prefix: &str) {
+            self.0.typed = prefix.to_string();
+        }
+
+        /// The most common first letter among multi-letter labels: typing
+        /// it leaves roughly 1/alphabet of the hints visible.
+        pub fn common_prefix(&self) -> String {
+            let mut counts: HashMap<char, usize> = HashMap::new();
+            for h in self.0.laid.iter().filter(|h| h.label.chars().count() > 1) {
+                if let Some(c) = h.label.chars().next() {
+                    *counts.entry(c).or_default() += 1;
+                }
+            }
+            counts
+                .into_iter()
+                .max_by_key(|&(c, n)| (n, std::cmp::Reverse(c)))
+                .map(|(c, _)| c.to_string())
+                .unwrap_or_default()
+        }
+
+        /// Draw every visible hint (no clear, no DWM hand-off).
+        pub fn draw(&self, surface: &mut Surface) {
+            unsafe {
+                self.0
+                    .draw_all(surface.mem_dc, surface.bits, surface.width, surface.height)
             }
         }
     }
