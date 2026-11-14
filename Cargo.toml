@@ -68,6 +68,19 @@ notify = "6"
 # PNG image decoding for splash screen and tray icon.
 png = "0.17"
 
+[features]
+# Exposes `keyhop::windows::overlay::bench` for the criterion benchmarks.
+# Not part of the public API; off by default.
+bench = []
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "overlay_render"
+harness = false
+required-features = ["bench"]
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

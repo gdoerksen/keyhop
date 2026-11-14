@@ -67,7 +67,7 @@ use windows::Win32::UI::Controls::{
     TTM_ADDTOOLW, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW, UDM_GETPOS32, UDM_SETPOS32,
     UDM_SETRANGE32, UDS_ALIGNRIGHT, UDS_ARROWKEYS, UDS_AUTOBUDDY, UDS_SETBUDDYINT,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GetDlgItem, GetMessageW, GetParent, GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW,
@@ -128,6 +128,8 @@ const LEFT_FIELD_W: i32 = 240;
 const RIGHT_LABEL_X: i32 = 440;
 const RIGHT_FIELD_X: i32 = RIGHT_LABEL_X + LABEL_W + 4;
 const RIGHT_FIELD_W: i32 = 240;
+/// Width of the badge-size spinners; the "Auto" checkbox sits after it.
+const FONT_SPINNER_W: i32 = 80;
 
 /// Width of the colored swatch button next to a hex color edit.
 const SWATCH_W: i32 = 28;
@@ -166,6 +168,15 @@ const ID_HINT_ORDER: usize = 1024;
 const ID_KEYBOARD_LAYOUT: usize = 1025;
 const ID_KEYBOARD_GEOMETRY: usize = 1026;
 const ID_CONSECUTIVE_KEYS: usize = 1027;
+const ID_BADGE_SHAPE: usize = 1028;
+const ID_ELEMENT_FONT_AUTO: usize = 1029;
+const ID_WINDOW_FONT_AUTO: usize = 1030;
+
+/// Element badge shape choices, in combo order: (config value, label).
+const BADGE_SHAPE_OPTIONS: [(overlay::BadgeShape, &str); 2] = [
+    (overlay::BadgeShape::Callout, "Callout (points at target)"),
+    (overlay::BadgeShape::Rect, "Corner rectangle"),
+];
 
 // Numeric labels mirroring trackbar / spinner positions live in
 // the 1100+ range so we can update them on slider drag without an
@@ -268,18 +279,24 @@ struct State {
     element_opacity: HWND,
     window_opacity: HWND,
     show_leader: HWND,
+    badge_shape: HWND,
     scope_mode: HWND,
     max_elements: HWND,
     enable_caching: HWND,
     cache_ttl_ms: HWND,
     element_font_size: HWND,
+    /// "Auto" checkboxes next to the size spinners: checked = save
+    /// `font_size = 0` (DPI-scaled preset size).
+    element_font_auto: HWND,
+    window_font_auto: HWND,
     window_font_size: HWND,
     launch_startup: HWND,
-    /// Snapshot of the leader-line preference at dialog open. Used to
-    /// decide whether to write `show_leader = Some(...)` or leave it as
-    /// `None` (preset default) — we only persist an explicit override
-    /// when the user actually toggled the checkbox.
-    initial_show_leader: Option<bool>,
+    /// Badge colors/options as loaded at dialog open. Save starts from
+    /// this and overrides only what the dialog controls, so fields with
+    /// no UI (badge_fg, border, leader_color, the window picker's
+    /// show_leader / shape) survive, and untouched controls keep the
+    /// file's value (e.g. `None` / `""` / `0` = preset default).
+    initial_colors: ColorConfig,
     /// `Some(_)` once the user clicks Save (or Reset to Defaults) and
     /// the resulting [`Config`] has been written to disk. Surfaced to
     /// [`show`] so the caller can hot-apply without re-reading the file.
@@ -448,7 +465,10 @@ mod tips {
         "Element badge transparency.\n\n0 = use the preset default (90%).\n100 = fully opaque.";
     pub const WINDOW_OPACITY: &str =
         "Window badge transparency.\n\n0 = use the preset default (90%).\n100 = fully opaque.";
-    pub const SHOW_LEADER: &str = "Draw a thin colored arrow from each badge to its target element. Useful when badges are stacked or far from their target.";
+    pub const BADGE_SHAPE: &str = "Callout: a rounded label just below each element with a small tail pointing at it (flips above or beside it when crowded).\n\nCorner rectangle: the classic badge in the element's top-left corner.";
+    pub const SHOW_LEADER: &str = "Element picker: outline each target and draw a thin arrow from badges that were pushed off their element. Callouts never outline; they only get the arrow when there was no room for a tail.
+
+The window picker's setting lives in config.toml ([colors.window] show_leader).";
     pub const CONSECUTIVE_KEYS: &str = "Which key pairs two- and three-key labels may contain. Pressing the same key twice, or two keys with the same finger, means lifting and re-striking one finger, which is slower than alternating.\n\n• No repeats or same finger: never `ll` or `fg`. Fingers follow the Keyboard section.\n• No repeated keys: never `ll`.\n• Allow any keys: the original labels (a few more short labels on busy screens).";
     pub const KEYBOARD_LAYOUT: &str = "Which keyboard layout hint keys are chosen for.\n\n• Auto — follow the active Windows layout (works with any installed layout).\n• A named layout — use this when your keyboard remaps keys in its firmware while Windows stays on QWERTY.";
     pub const KEYBOARD_GEOMETRY: &str = "The physical shape of your keyboard. Used to work out which finger types each key.\n\n• Standard — ordinary laptop/desktop keyboard. The diagonal b and 6 keys count as either index finger.\n• Angle mod — left bottom row shifted one finger toward the pinky.\n• Ortholinear / split ergo — keys in straight columns; b is left index, 6 right index.";
@@ -457,6 +477,7 @@ mod tips {
     pub const ENABLE_CACHING: &str = "Memoize element trees per window so repeat picks (Esc, retry) skip the slow accessibility walk.\n\nDisable only when debugging stale-results bugs; the TTL already keeps drift bounded.";
     pub const CACHE_TTL: &str = "How long an element tree stays cached, in milliseconds.\n\nLower = fresher results when UI changes between picks; higher = faster repeat picks. 500 ms is a good balance.";
     pub const ELEMENT_FONT_SIZE: &str = "Badge label height in pixels for element hints.\n\nThe suggested default is calculated from your monitor's DPI scaling. Increase for better readability on high-DPI screens; decrease for a more compact overlay.";
+    pub const FONT_SIZE_AUTO: &str = "Scale the badge size automatically with the monitor's DPI (saved as font_size = 0). The number shows the size used on your primary monitor.\n\nUntick to pick a fixed size.";
     pub const WINDOW_FONT_SIZE: &str = "Badge label height in pixels for window-picker hints.\n\nThe suggested default is calculated from your monitor's DPI scaling.";
     pub const LAUNCH_STARTUP: &str = "Run keyhop automatically when you sign in to Windows. Implemented by writing to HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run.";
     pub const SAVE: &str = "Apply changes immediately and close. Hotkeys, alphabet, scope, colors, and cache are all hot-reloaded — no restart needed.";
@@ -870,12 +891,24 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         ID_ELEMENT_FONT_SIZE_UD,
         RIGHT_FIELD_X,
         y,
-        80,
+        FONT_SPINNER_W,
         6,
         120,
         el_fs,
     );
     add_tip(tooltip, hwnd, element_font_size, tips::ELEMENT_FONT_SIZE);
+    let element_font_auto = create_checkbox(
+        hwnd,
+        hinstance,
+        "Auto",
+        initial.colors.element.font_size == 0,
+        ID_ELEMENT_FONT_AUTO,
+        RIGHT_FIELD_X + FONT_SPINNER_W + 12,
+        y,
+        RIGHT_FIELD_W - FONT_SPINNER_W - 12,
+    );
+    add_tip(tooltip, hwnd, element_font_auto, tips::FONT_SIZE_AUTO);
+    apply_font_auto(hwnd, ID_ELEMENT_FONT_AUTO);
     y += ROW_H;
 
     let win_fs = if initial.colors.window.font_size > 0 {
@@ -891,20 +924,50 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         ID_WINDOW_FONT_SIZE_UD,
         RIGHT_FIELD_X,
         y,
-        80,
+        FONT_SPINNER_W,
         10,
         120,
         win_fs,
     );
     add_tip(tooltip, hwnd, window_font_size, tips::WINDOW_FONT_SIZE);
+    let window_font_auto = create_checkbox(
+        hwnd,
+        hinstance,
+        "Auto",
+        initial.colors.window.font_size == 0,
+        ID_WINDOW_FONT_AUTO,
+        RIGHT_FIELD_X + FONT_SPINNER_W + 12,
+        y,
+        RIGHT_FIELD_W - FONT_SPINNER_W - 12,
+    );
+    add_tip(tooltip, hwnd, window_font_auto, tips::FONT_SIZE_AUTO);
+    apply_font_auto(hwnd, ID_WINDOW_FONT_AUTO);
     y += ROW_H;
 
-    let initial_show_leader = initial
-        .colors
-        .element
-        .show_leader
-        .or(initial.colors.window.show_leader);
-    let show_leader_checked = initial_show_leader.unwrap_or(true);
+    create_label(hwnd, hinstance, "Element badge shape:", RIGHT_LABEL_X, y);
+    let initial_shape = overlay::BadgeShape::from_config(&initial.colors.element.shape)
+        .unwrap_or(overlay::HintStyle::elements().shape);
+    let badge_shape = create_combo(
+        hwnd,
+        hinstance,
+        BADGE_SHAPE_OPTIONS.iter().map(|(_, label)| *label),
+        BADGE_SHAPE_OPTIONS
+            .iter()
+            .position(|(shape, _)| *shape == initial_shape)
+            .unwrap_or(0),
+        ID_BADGE_SHAPE,
+        RIGHT_FIELD_X,
+        y,
+        RIGHT_FIELD_W,
+    );
+    add_tip(tooltip, hwnd, badge_shape, tips::BADGE_SHAPE);
+    y += ROW_H;
+
+    // Element picker only: the window picker keeps whatever the file
+    // says (preset default: off).
+    let initial_show_leader = initial.colors.element.show_leader;
+    let show_leader_checked =
+        initial_show_leader.unwrap_or(overlay::HintStyle::elements().show_leader);
     let right_column_w = LABEL_W + RIGHT_FIELD_W + 4;
     let show_leader = create_checkbox(
         hwnd,
@@ -1065,14 +1128,17 @@ unsafe fn build_controls(hwnd: HWND, hinstance: HINSTANCE, initial: &Config) {
         element_opacity,
         window_opacity,
         show_leader,
+        badge_shape,
         scope_mode,
         max_elements,
         enable_caching,
         cache_ttl_ms,
         element_font_size,
         window_font_size,
+        element_font_auto,
+        window_font_auto,
         launch_startup,
-        initial_show_leader,
+        initial_colors: initial.colors.clone(),
         saved_config: None,
     });
     STATE.with(|s| *s.borrow_mut() = Some(state));
@@ -1487,6 +1553,7 @@ unsafe extern "system" fn window_proc(
                         let _ = DestroyWindow(hwnd);
                     }
                     ID_RESET => on_reset(hwnd),
+                    ID_ELEMENT_FONT_AUTO | ID_WINDOW_FONT_AUTO => apply_font_auto(hwnd, id),
                     other if is_swatch_id(other) => on_swatch_clicked(hwnd, other),
                     _ => {}
                 }
@@ -1819,18 +1886,46 @@ fn collect_config() -> Option<(Config, bool)> {
         let min_singles = unsafe { spinner_value(st.min_singles) }.max(0) as usize;
         let enable_caching = unsafe { is_checked(st.enable_caching) };
         let show_leader_checked = unsafe { is_checked(st.show_leader) };
-        // Keep the preset default (None) unless the user actually
-        // changed the checkbox from how we showed it. This way upgrade
-        // paths don't suddenly hard-pin everyone to a value, and the
-        // window picker stays leader-less unless the user explicitly
-        // opts in.
-        let show_leader = if Some(show_leader_checked) == st.initial_show_leader {
-            st.initial_show_leader
+        // Keep the file's value (often None = preset default) unless the
+        // user actually changed the checkbox from how we showed it, so
+        // saving other settings never hard-pins the leader preference.
+        let init = &st.initial_colors;
+        let shown_show_leader = init
+            .element
+            .show_leader
+            .unwrap_or(overlay::HintStyle::elements().show_leader);
+        let show_leader = if show_leader_checked == shown_show_leader {
+            init.element.show_leader
         } else {
             Some(show_leader_checked)
         };
-        let element_font_size = unsafe { spinner_value(st.element_font_size) }.clamp(6, 120) as u8;
-        let window_font_size = unsafe { spinner_value(st.window_font_size) }.clamp(10, 120) as u8;
+        // Same idea for the shape: an untouched combo keeps whatever the
+        // file had (usually "" = preset default).
+        let chosen_shape = BADGE_SHAPE_OPTIONS
+            .get(unsafe { combo_selection(st.badge_shape) })
+            .map(|(shape, _)| *shape)
+            .unwrap_or(overlay::BadgeShape::Callout);
+        let initial_shape = overlay::BadgeShape::from_config(&init.element.shape)
+            .unwrap_or(overlay::HintStyle::elements().shape);
+        let element_shape = if chosen_shape == initial_shape {
+            init.element.shape.clone()
+        } else {
+            match chosen_shape {
+                overlay::BadgeShape::Callout => "callout".to_string(),
+                overlay::BadgeShape::Rect => "rect".to_string(),
+            }
+        };
+        // `0` = auto (DPI-scaled preset size), chosen by the Auto boxes.
+        let element_font_size = if unsafe { is_checked(st.element_font_auto) } {
+            0
+        } else {
+            unsafe { spinner_value(st.element_font_size) }.clamp(6, 120) as u8
+        };
+        let window_font_size = if unsafe { is_checked(st.window_font_auto) } {
+            0
+        } else {
+            unsafe { spinner_value(st.window_font_size) }.clamp(10, 120) as u8
+        };
         let launch_startup = unsafe { is_checked(st.launch_startup) };
 
         // For non-Custom presets the "custom alphabet" field is a
@@ -1877,21 +1972,17 @@ fn collect_config() -> Option<(Config, bool)> {
             colors: ColorConfig {
                 element: BadgeColors {
                     badge_bg: element_bg,
-                    badge_fg: String::new(),
-                    border: String::new(),
                     opacity: element_opacity,
                     show_leader,
-                    leader_color: String::new(),
                     font_size: element_font_size,
+                    shape: element_shape,
+                    ..init.element.clone()
                 },
                 window: BadgeColors {
                     badge_bg: window_bg,
-                    badge_fg: String::new(),
-                    border: String::new(),
                     opacity: window_opacity,
-                    show_leader,
-                    leader_color: String::new(),
                     font_size: window_font_size,
+                    ..init.window.clone()
                 },
             },
             startup: StartupConfig {
@@ -1941,6 +2032,34 @@ unsafe fn trackbar_pos(hwnd: HWND) -> u8 {
     }
     let raw = SendMessageW(hwnd, TBM_GETPOS, WPARAM(0), LPARAM(0)).0 as i32;
     raw.clamp(0, 100) as u8
+}
+
+/// Sync a size spinner with its "Auto" checkbox: auto greys out the
+/// spinner and shows the DPI-suggested size; manual re-enables it.
+unsafe fn apply_font_auto(parent: HWND, auto_id: usize) {
+    let (edit_id, ud_id, suggested) = match auto_id {
+        ID_ELEMENT_FONT_AUTO => (
+            ID_ELEMENT_FONT_SIZE,
+            ID_ELEMENT_FONT_SIZE_UD,
+            overlay::suggested_element_font_size(),
+        ),
+        _ => (
+            ID_WINDOW_FONT_SIZE,
+            ID_WINDOW_FONT_SIZE_UD,
+            overlay::suggested_window_font_size(),
+        ),
+    };
+    let item = |id: usize| GetDlgItem(parent, id as i32).unwrap_or(HWND(std::ptr::null_mut()));
+    let auto = is_checked(item(auto_id));
+    let ud = item(ud_id);
+    if auto && !ud.0.is_null() {
+        SendMessageW(ud, UDM_SETPOS32, WPARAM(0), LPARAM(suggested as isize));
+    }
+    for h in [item(edit_id), ud] {
+        if !h.0.is_null() {
+            let _ = EnableWindow(h, !auto);
+        }
+    }
 }
 
 /// Current value of an UpDown spinner, read via UDM_GETPOS32 so the

@@ -156,7 +156,8 @@ Yellow badges = element picker (will *invoke* the control). Orange badges = wind
 - **Performance** — toggles the in-process element-tree cache (default on, 500 ms TTL). The cache memoises each window's UIA enumeration so the "press Esc, retry" flow is instant on a steady screen.
 - **Overlay colors** — element badge background and window badge background, as `#RRGGBB` hex.
 - **Overlay opacity** — per-badge-style translucency from `0` to `100` (where `0` means "use the preset default" and `100` means fully opaque). Lower values let the underlying UI bleed through so you can see what you're about to invoke; the defaults sit around 90% for the element picker and 94% for the window picker.
-- **Target indicator** — when enabled, every element badge paints a thin outline (in the badge's background color) around the actual click target so it's instantly clear which underlying control each card represents — yellow badge, yellow rectangle around the matching element. When smart positioning had to push the badge off the element to dodge a collision, a connector line ending in a small filled triangle is also drawn from the badge to the element. On by default for the element picker; off for the window picker (which already shows a title pill). Toggle per picker via `colors.element.show_leader` / `colors.window.show_leader` in `config.toml`, or via the "Draw arrow from each badge to its target element" checkbox in the Settings dialog.
+- **Badge shape** — `Callout` (default for the element picker) draws each hint as a rounded label just below its element, with a small tail pointing at the element's centre, so you can see exactly which control a label belongs to without the label covering it. When that spot is taken it flips above the element, slides sideways (the tail keeps pointing at the element), or moves beside it (useful in dense lists and menus). `Corner rectangle` brings back the classic badge in the element's top-left corner. Set it with the "Element badge shape" dropdown in Settings or `shape = "callout" | "rect"` under `[colors.element]` / `[colors.window]`. The window picker stays rectangular by default.
+- **Target indicator** — when enabled, every element badge paints a thin outline (in the badge's background color) around the actual click target so it's instantly clear which underlying control each card represents — yellow badge, yellow rectangle around the matching element. When smart positioning had to push the badge off the element to dodge a collision, a connector line ending in a small filled triangle is also drawn from the badge to the element. Callouts never draw the outline, since their tail already points at the element; the rare callout with no room for a tail gets just the connector arrow. On by default for the element picker; off for the window picker (which already shows a title pill). Toggle per picker via `colors.element.show_leader` / `colors.window.show_leader` in `config.toml`. The "Draw arrow from badge to target" checkbox in the Settings dialog controls the element picker only.
 - **Launch at Windows startup** — toggles a per-user entry in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (no admin rights required).
 
 `Save` validates everything (invalid hotkey strings or hex colors are rejected up-front), writes `%APPDATA%\keyhop\config.toml`, and shows a confirmation. `Reset to Defaults` deletes the config file. Hotkey, alphabet, and color changes apply on the next launch; the startup toggle takes effect immediately.
@@ -203,6 +204,7 @@ border       = ""
 opacity      = 0          # 0 = preset default; 1..100 = explicit percent
 show_leader  = true       # omit the line entirely to keep the preset default
 leader_color = ""         # hex pen color for the arrow; empty = preset default
+shape        = ""         # callout | rect; empty = preset default (callout)
 
 [colors.window]
 badge_bg     = "#33AAFF"
@@ -211,6 +213,7 @@ border       = ""
 opacity      = 0
 show_leader  = false
 leader_color = ""
+shape        = ""         # empty = preset default (rect)
 
 [startup]
 launch_at_startup = false
